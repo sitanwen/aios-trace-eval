@@ -30,8 +30,8 @@
       model: { primary: "deepseek/deepseek-v4-flash", fallbacks: [] },
       models: { "deepseek/deepseek-v4-flash": { alias: "DeepSeek" } },
       modelPolicy: { allow: ["deepseek/deepseek-v4-flash"] },
-      // 改成你的项目绝对路径。
-      workspace: "D:/path/to/aios-trace-eval",
+      // 改成你的项目绝对路径；Linux 示例：/opt/aios-trace-eval
+      workspace: "/absolute/path/to/aios-trace-eval",
       maxConcurrent: 1,
       subagents: { maxConcurrent: 1 },
     },

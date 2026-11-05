@@ -367,22 +367,42 @@ class Store:
         where: List[str] = []
         args: List[Any] = []
         if status:
-            where.append("business_status = ?")
+            where.append("t.business_status = ?")
             args.append(status)
         if query:
-            where.append("(trace_id LIKE ? OR case_id LIKE ? OR model LIKE ? OR agent LIKE ?)")
+            where.append("""(
+                t.trace_id LIKE ? OR t.case_id LIKE ? OR t.model LIKE ? OR t.agent LIKE ?
+                OR c.name LIKE ? OR d.name LIKE ? OR e.name LIKE ?
+            )""")
             needle = f"%{query}%"
-            args.extend([needle] * 4)
+            args.extend([needle] * 7)
         clause = f"WHERE {' AND '.join(where)}" if where else ""
         args.append(min(max(limit, 1), 500))
         with self.connection() as db:
             return [dict(row) for row in db.execute(
-                f"SELECT * FROM traces {clause} ORDER BY started_at_ns DESC LIMIT ?", args
+                f"""
+                SELECT t.*, c.name AS case_name, c.dataset_id, d.name AS dataset_name,
+                       e.name AS experiment_name
+                FROM traces t
+                LEFT JOIN eval_cases c ON c.case_id=t.case_id
+                LEFT JOIN eval_datasets d ON d.dataset_id=c.dataset_id
+                LEFT JOIN eval_experiments e ON e.experiment_id=t.experiment_id
+                {clause}
+                ORDER BY t.started_at_ns DESC LIMIT ?
+                """, args
             ).fetchall()]
 
     def get_trace(self, trace_id: str) -> Optional[Dict[str, Any]]:
         with self.connection() as db:
-            trace_row = db.execute("SELECT * FROM traces WHERE trace_id=?", (trace_id,)).fetchone()
+            trace_row = db.execute("""
+                SELECT t.*, c.name AS case_name, c.dataset_id, d.name AS dataset_name,
+                       e.name AS experiment_name
+                FROM traces t
+                LEFT JOIN eval_cases c ON c.case_id=t.case_id
+                LEFT JOIN eval_datasets d ON d.dataset_id=c.dataset_id
+                LEFT JOIN eval_experiments e ON e.experiment_id=t.experiment_id
+                WHERE t.trace_id=?
+            """, (trace_id,)).fetchone()
             if not trace_row:
                 return None
             spans = []

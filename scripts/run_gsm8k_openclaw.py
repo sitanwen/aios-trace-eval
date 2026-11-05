@@ -14,12 +14,12 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-API = "http://127.0.0.1:8080"
+API = os.environ.get("AIOS_BASE_URL", "http://127.0.0.1:8080").rstrip("/")
 SOURCE = ROOT / "work" / "datasets" / "gsm8k-test.jsonl"
 SOURCE_URL = "https://raw.githubusercontent.com/openai/grade-school-math/master/grade_school_math/data/test.jsonl"
 SOURCE_SHA256 = "3730d312f6e3440559ace48831e51066acaca737f6eabec99bccb9e4b3c39d14"
-CONFIG = ROOT / "work" / "openclaw-8.2" / "openclaw-deepseek.json5"
-STATE = ROOT / "work" / "openclaw-8.2" / "state"
+CONFIG = Path(os.environ["OPENCLAW_CONFIG_PATH"]).resolve() if os.environ.get("OPENCLAW_CONFIG_PATH") else None
+STATE = Path(os.environ["OPENCLAW_STATE_DIR"]).resolve() if os.environ.get("OPENCLAW_STATE_DIR") else None
 
 
 def request(path: str, method: str = "GET", payload: dict | None = None):
@@ -111,8 +111,11 @@ def run_case(experiment: dict, case: dict, index: int) -> dict:
     gateway_token = env.get("OPENCLAW_GATEWAY_TOKEN")
     if not gateway_token:
         raise RuntimeError("请先设置 OPENCLAW_GATEWAY_TOKEN")
-    env.update({"OPENCLAW_STATE_DIR": str(STATE), "OPENCLAW_CONFIG_PATH": str(CONFIG),
-                "OPENCLAW_GATEWAY_PORT": env.get("OPENCLAW_GATEWAY_PORT", "18790")})
+    env["OPENCLAW_GATEWAY_PORT"] = env.get("OPENCLAW_GATEWAY_PORT", "18790")
+    if CONFIG is not None:
+        env["OPENCLAW_CONFIG_PATH"] = str(CONFIG)
+    if STATE is not None:
+        env["OPENCLAW_STATE_DIR"] = str(STATE)
     session_id = f"gsm8k-{index + 1}-{uuid.uuid4().hex[:8]}"
     executable = shutil.which("openclaw.cmd") if os.name == "nt" else shutil.which("openclaw")
     if not executable:
@@ -155,9 +158,18 @@ def run_case(experiment: dict, case: dict, index: int) -> dict:
 
 
 def main() -> None:
+    global API, CONFIG, STATE
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int, default=5)
+    parser.add_argument("--api-url", default=API, help="AIOS Trace Eval API 地址")
+    parser.add_argument("--gateway-port", default=os.environ.get("OPENCLAW_GATEWAY_PORT", "18790"))
+    parser.add_argument("--openclaw-config", help="可选：指定 OpenClaw 配置文件")
+    parser.add_argument("--openclaw-state-dir", help="可选：指定 OpenClaw 状态目录")
     args = parser.parse_args()
+    API = args.api_url.rstrip("/")
+    CONFIG = Path(args.openclaw_config).expanduser().resolve() if args.openclaw_config else CONFIG
+    STATE = Path(args.openclaw_state_dir).expanduser().resolve() if args.openclaw_state_dir else STATE
+    os.environ["OPENCLAW_GATEWAY_PORT"] = str(args.gateway_port)
     experiment, cases = setup(args.limit)
     request(f"/api/experiments/{experiment['experiment_id']}/status", "POST", {"status": "running"})
     existing = request(f"/api/eval-experiments/{experiment['experiment_id']}")

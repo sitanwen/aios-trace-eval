@@ -14,6 +14,9 @@ dependencies = [
   "opentelemetry-proto>=1.28,<2",
 ]
 
+[project.optional-dependencies]
+test = ["httpx>=0.27,<1"]
+
 [project.scripts]
 aios-trace-eval = "aios_trace_eval.__main__:main"
 aios-trace-eval-server = "aios_trace_eval.server:main"

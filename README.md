@@ -15,6 +15,8 @@ AIOS Trace Eval 是一个面向 OpenClaw 的 Agent 可观测与评测平台。�
 
 项目按 OpenClaw `2026.8.x` 的诊断配置结构实现。目前只对 `2026.8.2` 做过完整验证；使用更早或更新版本时，应先确认 `diagnostics.otel` 字段和插件版本是否兼容。
 
+平台核心使用 Python、FastAPI、SQLite 和原生浏览器 JavaScript，不依赖 Windows 专有组件。Docker 镜像基于 Linux，持续集成会在 Ubuntu 上使用 Python 3.10 和 3.12 执行完整自测。Windows 和 Linux 的差异只出现在环境变量写法及 OpenClaw 可执行文件解析中，批量 Runner 已分别处理 `openclaw.cmd` 和 `openclaw`。
+
 ## 能做什么
 
 - 接收并解析 OpenClaw OTLP Trace
@@ -205,11 +207,33 @@ normalize_number(response) == normalize_number(reference)
 
 运行前需已启动 AIOS Trace Eval 和 OpenClaw Gateway，并提供 Gateway 连接信息：
 
+Linux / macOS：
+
+```bash
+export PYTHONPATH=src
+export OPENCLAW_GATEWAY_TOKEN="<Gateway Token>"
+export OPENCLAW_GATEWAY_PORT=18790
+python scripts/run_gsm8k_openclaw.py --limit 5
+```
+
+Windows PowerShell：
+
 ```powershell
 $env:PYTHONPATH = "src"
 $env:OPENCLAW_GATEWAY_TOKEN = "<Gateway Token>"
 $env:OPENCLAW_GATEWAY_PORT = "18790"
 python scripts/run_gsm8k_openclaw.py --limit 5
+```
+
+非默认部署可以通过参数指定平台地址和 OpenClaw 目录：
+
+```bash
+python scripts/run_gsm8k_openclaw.py \
+  --api-url https://eval.example.com \
+  --gateway-port 18790 \
+  --openclaw-config /etc/openclaw/openclaw.json \
+  --openclaw-state-dir /var/lib/openclaw \
+  --limit 5
 ```
 
 下载的数据、OpenClaw 本地状态、密钥和 SQLite 运行数据库位于被 Git 忽略的目录中，不会随代码提交。
@@ -239,6 +263,18 @@ python scripts/run_gsm8k_openclaw.py --limit 5
 | `AIOS_RELOAD` | `0` | 开发环境自动重载开关 |
 
 ## 开发验证
+
+Linux / macOS：
+
+```bash
+export PYTHONPATH=src
+python -m compileall -q src scripts
+node --check web/assets/app.js
+python scripts/selftest.py
+python scripts/selftest_platform.py
+```
+
+Windows PowerShell：
 
 ```powershell
 $env:PYTHONPATH = "src"

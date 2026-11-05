@@ -428,6 +428,10 @@ main {
 .resource-card:hover {
   border-color: #b9c5d9;
 }
+.resource-card.interactive:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
 .resource-icon {
   width: 40px;
   height: 40px;
