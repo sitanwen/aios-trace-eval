@@ -1,176 +1,288 @@
 # AIOS Trace Eval
 
-面向 OpenClaw 的一体化 Agent 可观测与评测平台。OpenClaw 通过 **OpenTelemetry GenAI / OTLP HTTP** 上报，平台在一个 Web 控制台里完成 Trace、Token、耗时、业务成功率、实验对比和质量门禁。
+AIOS Trace Eval 是一个面向 OpenClaw 的 Agent 可观测与评测平台。它接收 OpenClaw 通过 OpenTelemetry 导出的运行数据，将 Trace、模型调用、Token、耗时、工具调用和评测结果关联到同一次 Run，并提供数据集、评估器、实验与逐样本结果管理。
 
-项目不再依赖 Grafana、Jaeger 或裸 JSON 报告作为用户界面。
+当前版本适合本地开发、单机实验和小规模团队验证。生产部署前请先阅读“当前边界”。
 
-## 设计目标
+## 已验证的 OpenClaw 版本
 
-- **单一入口**：控制台、REST API 和 OTLP 接收端共用 `http://localhost:8080`。
-- **统一 Run 模型**：Trace 是运行证据，业务终态是成功判定，两者通过 `run_id / trace_id` 关联。
-- **原生 Trace Explorer**：模型调用、工具调用、错误和耗时瀑布图直接在平台内展示。
-- **可评测**：业务终态断言优先，其次是轨迹规则，LLM Judge 仅用于开放产出。
-- **可比较**：同一评测集下比较 Agent、模型、Prompt 或 Skill 版本。
-- **可门禁**：业务正确性一票否决，Token 和耗时相对基线控制。
+| 组件 | 已验证版本 | 说明 |
+|---|---:|---|
+| OpenClaw | `2026.8.2` | 本项目的真实回归环境 |
+| diagnostics-otel | `2026.8.2` | OpenClaw OpenTelemetry 插件 |
+| OTLP 协议 | `http/protobuf` | Trace 接收路径为 `/v1/traces` |
+| Python | `3.10+` | 平台运行环境 |
 
-## 架构
+项目按 OpenClaw `2026.8.x` 的诊断配置结构实现。目前只对 `2026.8.2` 做过完整验证；使用更早或更新版本时，应先确认 `diagnostics.otel` 字段和插件版本是否兼容。
 
-```text
-OpenClaw diagnostics-otel
-          │ OTLP/HTTP protobuf
-          ▼
-┌───────────────────────────────────────┐
-│ AIOS Trace Eval :8080                 │
-│                                       │
-│ /v1/traces  OTLP receiver             │
-│ /api/*      observability + eval API  │
-│ /           unified web console       │
-│               │                       │
-│          SQLite storage               │
-└───────────────────────────────────────┘
-```
+## 能做什么
 
-当前版本使用 SQLite，适合单机和团队评测环境。接口与存储已分层，生产规模可将 `Store` 替换为 PostgreSQL + ClickHouse，而不改变 OpenClaw 接入和前端页面。
+- 接收并解析 OpenClaw OTLP Trace
+- 统计输入、输出、缓存与总 Token
+- 记录端到端耗时、TTFT、模型调用、工具调用、工具错误与 Failover
+- 管理 Agent、评测数据集和 Case
+- 组合规则、轨迹规则、LLM Judge、Code 表达式与人工评估器
+- 保存每个评估器的得分、理由和证据
+- 汇总实验通过率、平均分、总 Token、平均耗时和逐样本结果
+- 在 Web 控制台中查看 Run 和 Span 明细
 
-## 快速开始
+## OpenClaw 接入
 
-### Docker
+### 1. 部署 AIOS Trace Eval
+
+使用 Docker Compose：
 
 ```bash
-cd config
+git clone https://github.com/sitanwen/aios-trace-eval.git
+cd aios-trace-eval/config
 docker compose up --build -d
 ```
 
-打开 `http://localhost:8080`。
-
-### 本地运行
+或者直接运行 Python 服务：
 
 ```powershell
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
 $env:PYTHONPATH = "src"
-python -m aios_trace_eval serve
+python -m aios_trace_eval serve --host 0.0.0.0 --port 8080
 ```
 
-## OpenClaw 接入
+服务包含以下入口：
 
-把 `config/openclaw-otel.json5` 中的配置合并进 OpenClaw 配置。核心配置是：
+| 路径 | 用途 |
+|---|---|
+| `/` | Web 控制台 |
+| `/api/health` | 健康检查 |
+| `/api/*` | 平台 API |
+| `/v1/traces` | OTLP Trace 接收 |
+| `/v1/metrics` | OTLP Metrics 接收 |
+| `/v1/logs` | OTLP Logs 接收 |
+
+本机调试可以访问 `http://127.0.0.1:8080`。部署到服务器后，应将下面配置中的 endpoint 换成实际服务地址，例如 `https://eval.example.com`。
+
+### 2. 安装匹配版本的 OpenTelemetry 插件
+
+在运行 OpenClaw 的环境中执行：
+
+```bash
+openclaw plugins install @openclaw/diagnostics-otel@2026.8.2 --accept-capabilities --pin
+```
+
+检查插件是否可用：
+
+```bash
+openclaw plugins list
+openclaw plugins doctor
+```
+
+OpenClaw 与 `diagnostics-otel` 建议使用相同版本，避免配置结构或遥测字段不一致。
+
+### 3. 配置 OpenClaw
+
+将 [config/openclaw-otel.json5](config/openclaw-otel.json5) 中的内容合并到现有 `openclaw.json`，不要直接覆盖原有模型、渠道和 Agent 配置。
+
+核心配置如下：
 
 ```json5
-diagnostics: {
-  enabled: true,
-  otel: {
+{
+  plugins: {
+    allow: ["diagnostics-otel"],
+    entries: {
+      "diagnostics-otel": { enabled: true },
+    },
+  },
+  diagnostics: {
     enabled: true,
-    endpoint: "http://127.0.0.1:8080",
-    protocol: "http/protobuf",
-    serviceName: "openclaw-eval",
-    traces: true,
-    metrics: true,
-    logs: false,
-    sampleRate: 1.0,
-    captureContent: false,
+    otel: {
+      enabled: true,
+      endpoint: "https://eval.example.com",
+      protocol: "http/protobuf",
+      serviceName: "openclaw-eval",
+      traces: true,
+      metrics: true,
+      logs: false,
+      sampleRate: 1.0,
+      flushIntervalMs: 1000,
+      captureContent: false,
+    },
   },
 }
 ```
 
-OpenClaw 会向 `/v1/traces` 上报 protobuf。平台从 Trace Span 直接聚合 Token 和运行指标，避免 Trace 与 Metrics 双重计数。
+配置说明：
 
-## 控制台
+- `endpoint`：AIOS Trace Eval 的实际服务地址，不要包含 `/v1/traces`。
+- `protocol`：当前适配 `http/protobuf`。
+- `serviceName`：用于区分环境、版本或 OpenClaw 实例，建议使用稳定且可识别的名称。
+- `sampleRate`：评测环境建议设为 `1.0`，保证每次运行都有完整证据。
+- `flushIntervalMs`：小规模评测建议使用 `1000`，减少运行结束到页面可见的等待时间。
+- `captureContent`：默认关闭，避免 Prompt、响应和工具参数随遥测发送。只有在数据治理允许的隔离环境中才应开启。
 
-- **工作台**：展示接入流程和真实运行数据概览；没有数据时保持空状态。
-- **Agent**：登记 OpenClaw Gateway 或兼容 HTTP Endpoint。
-- **数据集**：创建数据集，并维护任务输入、期望输出和断言 Case。
-- **评估器**：组合规则、轨迹规则、LLM Judge、受限 Code 表达式与人工复核。
-- **评测实验**：选择 Agent、数据集和多个评估器，查看汇总与逐样本结果。
-- **运行记录**：查看真实收到的 Trace、Token、耗时、模型与 Span 链路。
+如果采集服务需要鉴权，可以在 OpenClaw OTLP 配置中增加请求头，并在网关或反向代理层校验：
 
-## 评测流程
-
-当前最小闭环与百炼、CozeLoop 等平台的主流程一致：
-
-```text
-接入 Agent → 定义数据集 → 组合评估器 → 执行实验 → 逐样本评分 → 汇总报告
+```json5
+headers: {
+  Authorization: "Bearer ${OTEL_TOKEN}",
+}
 ```
 
-每条样本先经过 OpenClaw 真实执行并产生 OTLP Trace，再运行绑定的评估器。样本只有在全部自动评估器通过时才标记为通过；页面同时保留每个评估器的得分、理由和证据。
+### 4. 重启并验证
+
+重启 OpenClaw Gateway 或对应的 OpenClaw 进程，然后执行一次真实 Agent 任务。验证顺序：
+
+1. 请求 AIOS Trace Eval 的 `/api/health`，确认服务正常。
+2. 检查 OpenClaw 日志，确认 `diagnostics-otel` 已加载且没有导出错误。
+3. 执行一次会进入模型请求的 Agent 任务。
+4. 在“运行记录”中确认出现新的 Trace。
+5. 打开 Run 详情，核对模型、Token、耗时与 Span 链路。
+
+如果只出现健康检查或 Gateway 活动、但没有 Token 和模型 Span，通常表示任务没有真正进入模型请求，不能把这类运行当作评测样本。
+
+## 完整评测流程
+
+```text
+接入 Agent
+    ↓
+创建数据集与 Case
+    ↓
+配置评估器
+    ↓
+创建实验并绑定评估器
+    ↓
+逐条运行 Agent，接收完整 Trace
+    ↓
+执行评分并保存证据
+    ↓
+查看实验汇总和逐样本结果
+```
+
+### 数据集
+
+每条 Case 包含任务输入、参考答案和可选的确定性断言。数据集负责定义“测什么”，不保存运行生成的 Token 或耗时。
+
+### 评估器
+
+| 类型 | 用途 |
+|---|---|
+| Rule | 精确匹配、Token 上限、时延上限等确定性规则 |
+| Trajectory Rule | 工具错误、循环调用等过程规则 |
+| LLM Judge | 任务完成度、指令遵循、安全等语义评分 |
+| Code | 使用受限表达式执行可复核的自定义逻辑 |
+| Human | 人工复核结果 |
+
+LLM Judge 的模型配置与被测 Agent 分离。添加模型后应先使用“测试连通性”确认 API、模型名和密钥有效。
 
 ### Code 评估器
 
-MVP 不接收任意 Python 文件，也不在平台宿主机执行用户脚本。用户填写一个受限表达式，可读取：
+当前 Code 评估器不接收 Python 文件，也不会直接执行任意用户脚本。用户填写一个受限表达式，可访问：
 
-- `query`：样本输入
+- `query`：Case 输入
 - `response`：Agent 实际输出
 - `reference`：参考答案
-- `trace`：本次 Trace 聚合字段
+- `trace`：聚合后的 Trace 字段
 - `trajectory`：Span 列表
 
-可调用 `normalize_number`、`len`、`str`、`int`、`float`、`abs`、`min`、`max` 等纯函数；导入、属性访问、文件、网络和系统命令均被拒绝。例如：
+例如，数值答案一致性：
 
 ```python
 normalize_number(response) == normalize_number(reference)
 ```
 
-生产版若要支持完整 Python/JavaScript，应将每次评估放入无网络、只读文件系统、限 CPU/内存/时长的独立容器，而不是直接上传到平台进程执行。
+允许使用少量纯函数，如 `normalize_number`、`len`、`str`、`int`、`float`、`abs`、`min` 和 `max`。导入模块、属性访问、文件、网络和系统命令均会被拒绝。
 
-## GSM8K 真实小样本回归
+## GSM8K 小样本真实回归
 
-启动平台与 OpenClaw Gateway 后运行（脚本会下载并校验 OpenAI 官方 GSM8K，`work/` 不会提交 Git）：
+[scripts/run_gsm8k_openclaw.py](scripts/run_gsm8k_openclaw.py) 可以完成一个五条样本的端到端验证：
+
+1. 下载 OpenAI 官方 GSM8K `test.jsonl`。
+2. 校验文件 SHA-256。
+3. 创建数据集、Case 和评估器。
+4. 通过本地 OpenClaw Gateway 逐条运行。
+5. 等待完整 OTLP Trace。
+6. 执行数值正确性、Token、时延和工具错误评分。
+7. 输出并保存实验汇总。
+
+运行前需已启动 AIOS Trace Eval 和 OpenClaw Gateway，并提供 Gateway 连接信息：
 
 ```powershell
 $env:PYTHONPATH = "src"
-$env:OPENCLAW_GATEWAY_TOKEN = "<你的本地 Gateway Token>"
+$env:OPENCLAW_GATEWAY_TOKEN = "<Gateway Token>"
 $env:OPENCLAW_GATEWAY_PORT = "18790"
 python scripts/run_gsm8k_openclaw.py --limit 5
 ```
 
-脚本会幂等创建 5 条数据、数值答案评估器、Token/时延预算与实验，然后逐条调用 OpenClaw、等待完整 Trace、执行评分并输出真实汇总。它不会生成演示 Trace 或填补缺失指标。
+下载的数据、OpenClaw 本地状态、密钥和 SQLite 运行数据库位于被 Git 忽略的目录中，不会随代码提交。
 
 ## 指标口径
 
 | 指标 | 口径 |
 |---|---|
-| 运行完成 | OpenClaw Span 正常结束，仅代表执行层没有报错 |
-| 业务成功 | 环境终态断言或人工复核通过 |
-| Token/成功任务 | 仅对 `business_status=passed` 的 Run 汇总 Token，再除以通过数量 |
-| 任务耗时 | Trace 中最早 Span 到最晚 Span 的端到端时间 |
-| 工具错误率 | error/blocked 工具 Span ÷ 工具 Span 总数 |
-| 成本 | OpenClaw 上报的估算成本；不可替代供应商账单 |
+| Runtime 完成 | Trace 正常结束，只表示执行层完成 |
+| 业务通过 | 绑定的自动评估器全部通过 |
+| 总 Token | Trace 中输入、输出及缓存等 usage 的聚合结果 |
+| 端到端耗时 | Run Trace 最早 Span 到最晚 Span 的时间 |
+| TTFT | 模型请求到首个输出的时间，前提是 OpenClaw 上报该字段 |
+| 工具错误 | 状态为 error 或 blocked 的工具 Span 数量 |
+| 综合分 | 当前为已执行自动评估器得分的算术平均值 |
 
-“运行完成”和“业务成功”必须分开。Agent 给出了回答，不代表业务目标已经达成。
+“Runtime 完成”和“业务通过”是两个不同概念。模型成功返回内容不代表答案正确，也不代表任务目标已经完成。
 
-## 数据与隐私
+## 配置
 
-`captureContent` 默认关闭。只有在隔离评测环境、数据保留策略和权限已经确认时才应开启。生产环境建议把 Prompt、工具输入输出和产物放在独立对象存储，Trace 只保存引用。
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `AIOS_HOST` | `0.0.0.0` | 服务监听地址 |
+| `AIOS_PORT` | `8080` | 服务监听端口 |
+| `AIOS_DB_PATH` | `data/aios_eval.db` | SQLite 数据库路径 |
+| `AIOS_WEB_DIR` | `web` | 前端静态资源目录 |
+| `AIOS_RELOAD` | `0` | 开发环境自动重载开关 |
 
-## 目录
+## 开发验证
+
+```powershell
+$env:PYTHONPATH = "src"
+python -m compileall -q src scripts
+node --check web/assets/app.js
+python scripts/selftest.py
+python scripts/selftest_platform.py
+```
+
+## 项目结构
 
 ```text
 aios-trace-eval/
-├── config/
-│   ├── docker-compose.yml
-│   └── openclaw-otel.json5
-├── data/
-│   └── evalsets/
-├── docs/
+├── config/                       # Docker 与 OpenClaw 接入示例
+├── data/evalsets/                # 可提交的评测集样例
+├── docs/                         # 指标、字段映射与方案文档
+├── scripts/
+│   ├── run_gsm8k_openclaw.py     # GSM8K 真实批量回归
+│   ├── selftest.py
+│   └── selftest_platform.py
 ├── src/aios_trace_eval/
-│   ├── app.py                 # Web API + OTLP receiver
-│   ├── storage.py             # 统一存储
-│   ├── otlp.py                # OTLP protobuf 解析与 Trace 聚合
-│   ├── extractor.py           # 离线兼容提取器
-│   ├── judge.py               # 评测判定
-│   ├── code_eval.py           # 受限 Code 表达式
-│   └── runner.py              # OpenClaw Runner
-├── web/
-│   ├── index.html
-│   └── assets/
+│   ├── app.py                    # API、OTLP 接收和静态页面服务
+│   ├── storage.py                # SQLite 存储与实验聚合
+│   ├── otlp.py                   # OTLP protobuf 解码
+│   ├── code_eval.py              # 受限 Code 表达式
+│   ├── metrics.py                # 指标目录
+│   └── judge.py                  # 离线评测逻辑
+├── web/                          # 前端页面
 └── Dockerfile
 ```
 
 ## 当前边界
 
-- SQLite 适合单机评测；高并发生产部署应迁移到 PostgreSQL/ClickHouse。
-- 当前 `/v1/metrics` 接收成功但不单独落库，避免与 Trace usage 重复；运行级聚合以 Span 为准。
-- 精确的 `case_id / experiment_id / version` 需要作为 OTel 属性随 Run 注入。通过 Gateway 执行评测时应为每个 Case 注入独立 `traceparent`。
-- 终态断言仍需在隔离沙箱内执行，不应在平台宿主机运行任意 Shell。
-- Code 评估器目前是受限表达式，不是完整 Python/JavaScript 沙箱；评估器版本发布、字段映射 UI、并行调度和重试策略仍待完善。
+- 当前使用 SQLite，适合单机和小规模团队评测，不适合高并发遥测写入。
+- `/v1/metrics` 和 `/v1/logs` 当前接受请求但不单独落库；运行级指标以 Trace Span 为准。
+- Web 控制台目前不提供登录、租户隔离和权限控制，不应直接暴露到公网。
+- 批量实验目前通过脚本执行，尚未提供平台内任务队列、并行调度、取消和自动重试。
+- Code 评估器是受限表达式，不是完整 Python 或 JavaScript 沙箱。
+- LLM Judge 尚未实现评估器版本发布、Prompt 版本对比和 Judge 一致性校准。
+- 精确关联 Case 与 Trace 目前依赖批量 Runner 的顺序窗口；后续应在 OpenClaw 调用链中注入稳定的 Run ID 或 Trace Context。
+- `captureContent=false` 时不会采集 Prompt 与响应原文，因此无法执行依赖完整内容或工具参数的轨迹评估。
+
+生产部署建议至少增加 TLS、接入鉴权、数据保留策略、密钥管理、PostgreSQL/ClickHouse 存储和独立的评估任务执行器。
+
+## License
+
+当前仓库尚未添加开源许可证。在选择许可证之前，请不要假定代码可以被无限制复制、修改或再分发。
