@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AIOS Agent Eval</title>
+  <link rel="stylesheet" href="/assets/app.css" />
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar">
+      <a class="logo" href="#overview"><span>AI</span><strong>AIOS</strong></a>
+      <nav id="nav">
+        <a href="#overview" data-page="overview"><i>⌂</i>工作台</a>
+        <a href="#agents" data-page="agents"><i>◇</i>Agent</a>
+        <a href="#datasets" data-page="datasets"><i>▤</i>数据集</a>
+        <a href="#judges" data-page="judges"><i>✦</i>评测模型</a>
+        <a href="#evaluators" data-page="evaluators"><i>✓</i>评估器</a>
+        <a href="#experiments" data-page="experiments"><i>◎</i>评测实验</a>
+        <a href="#metrics" data-page="metrics"><i>⊕</i>指标体系</a>
+        <a href="#runs" data-page="runs"><i>≡</i>运行记录</a>
+      </nav>
+      <div class="sidebar-bottom"><span class="online"></span>OTLP 服务正常</div>
+    </aside>
+
+    <main>
+      <header class="header">
+        <div><h1 id="pageTitle">工作台</h1><p id="pageDesc">管理 Agent、数据集与评测实验</p></div>
+        <button id="headerAction" class="button primary hidden"></button>
+      </header>
+
+      <section id="page-overview" class="page">
+        <div class="welcome">
+          <h2>开始构建 Agent 评测流程</h2>
+          <p>接入你的 Agent，创建评测数据集，然后发起一次可重复的评测实验。</p>
+        </div>
+        <div class="steps">
+          <button data-goto="agents"><span>1</span><div><b>接入 Agent</b><small>配置 OpenClaw Gateway 或 HTTP Endpoint</small></div><em>→</em></button>
+          <button data-goto="datasets"><span>2</span><div><b>创建数据集</b><small>添加输入、期望输出与验收断言</small></div><em>→</em></button>
+          <button data-goto="experiments"><span>3</span><div><b>创建评测实验</b><small>选择 Agent 和数据集，运行并查看结果</small></div><em>→</em></button>
+        </div>
+        <div class="section-title"><div><h3>运行概览</h3><p>仅统计真实采集到的运行数据</p></div></div>
+        <div id="overviewStats" class="stats"></div>
+        <div class="panel">
+          <div class="panel-head"><div><h3>最近运行</h3><p>通过 OpenTelemetry 接收的 Agent Trace</p></div><button class="link-button" data-goto="runs">查看全部</button></div>
+          <div id="recentRuns"></div>
+        </div>
+      </section>
+
+      <section id="page-agents" class="page">
+        <div id="agentList" class="resource-list"></div>
+      </section>
+
+      <section id="page-datasets" class="page">
+        <div id="datasetList" class="resource-list"></div>
+      </section>
+
+      <section id="page-judges" class="page">
+        <div class="notice-card">
+          <div><b>LLM-as-a-Judge</b><p>独立于被测 Agent 的模型，根据 Case、期望结果与实际输出进行评分。API Key 仅保存在本机服务端，不会返回浏览器。</p></div>
+        </div>
+        <div id="judgeList" class="resource-list"></div>
+      </section>
+
+      <section id="page-evaluators" class="page">
+        <div class="notice-card evaluator-intro">
+          <div><b>指标定义与执行逻辑分离</b><p>规则评估器负责可复核门禁，LLM 评估器负责语义与 Rubric，轨迹评估器分析工具和步骤。一个实验可组合多个评估器。</p></div>
+          <div id="evaluatorSummary" class="mini-summary"></div>
+        </div>
+        <div class="toolbar evaluator-toolbar">
+          <select id="evaluatorDimension"><option value="">全部维度</option><option value="result">结果</option><option value="process">过程</option><option value="efficiency">效率</option><option value="risk">风险</option></select>
+          <select id="evaluatorType"><option value="">全部类型</option><option value="rule">规则</option><option value="trajectory_rule">轨迹规则</option><option value="llm">LLM Judge</option><option value="code">Code</option><option value="human">人工</option></select>
+        </div>
+        <div id="evaluatorList" class="evaluator-grid"></div>
+      </section>
+
+      <section id="page-experiments" class="page">
+        <div id="experimentList" class="resource-list"></div>
+      </section>
+
+      <section id="page-metrics" class="page">
+        <div id="metricSummary" class="dimension-grid"></div>
+        <div class="panel metric-panel">
+          <div class="panel-head"><div><h3>指标目录</h3><p>明确每项指标的证据来源；没有证据时不生成数值</p></div></div>
+          <div id="metricCatalog"></div>
+        </div>
+        <div class="panel vendor-panel">
+          <div class="panel-head"><div><h3>行业方案对照</h3><p>基于四家平台分析提炼其设计重点与缺口</p></div></div>
+          <div id="vendorCompare"></div>
+        </div>
+      </section>
+
+      <section id="page-runs" class="page">
+        <div class="toolbar">
+          <label class="search"><span>⌕</span><input id="runSearch" placeholder="搜索 Trace、Case、模型或 Agent" /></label>
+          <select id="runStatus"><option value="">全部状态</option><option value="passed">业务通过</option><option value="failed">业务失败</option><option value="ungraded">未评测</option></select>
+        </div>
+        <div class="panel"><div id="runList"></div></div>
+      </section>
+    </main>
+  </div>
+
+  <div id="modalBackdrop" class="modal-backdrop hidden">
+    <div class="modal" role="dialog" aria-modal="true">
+      <div class="modal-head"><div><h2 id="modalTitle"></h2><p id="modalDesc"></p></div><button id="modalClose" class="close">×</button></div>
+      <form id="modalForm"></form>
+    </div>
+  </div>
+
+  <div id="drawerBackdrop" class="drawer-backdrop hidden"></div>
+  <aside id="drawer" class="drawer" aria-hidden="true">
+    <div class="drawer-head"><div><h2 id="drawerTitle"></h2><p id="drawerDesc"></p></div><button id="drawerClose" class="close">×</button></div>
+    <div id="drawerBody" class="drawer-body"></div>
+  </aside>
+  <div id="toast" class="toast"></div>
+  <script src="/assets/app.js" defer></script>
+</body>
+</html>

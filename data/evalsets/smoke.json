@@ -1,0 +1,26 @@
+{
+  "name": "smoke",
+  "cases": [
+    {
+      "id": "echo_basic",
+      "query": "请回复 PONG",
+      "description": "最小链路冒烟：单轮应答，验证遥测采集与指标提取闭环",
+      "expected_state": "agent 正常返回一条回复",
+      "fixtures": [],
+      "terminal_assertions": [
+        {
+          "name": "process_exit_ok",
+          "check": "exit 0",
+          "timeout_s": 10
+        }
+      ],
+      "rule_assertions": [
+        { "name": "duration_under_120s", "field": "duration_ms", "operator": "lt", "value": 120000, "note": "任务耗时应小于 120 秒" },
+        { "name": "tokens_bounded", "field": "tokens.total", "operator": "lt", "value": 100000, "note": "总 token 上限，防止失控" }
+      ],
+      "llm_judge": false,
+      "repeats": 1,
+      "tags": ["smoke", "single-turn"]
+    }
+  ]
+}

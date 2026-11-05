@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.venv/
+data/*.db
+outputs/
+work/
+AGENTS.md
+BOOTSTRAP.md
+IDENTITY.md
+SOUL.md
+USER.md

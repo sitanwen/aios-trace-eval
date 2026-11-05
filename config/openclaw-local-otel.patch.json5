@@ -1,0 +1,17 @@
+{
+  diagnostics: {
+    enabled: true,
+    otel: {
+      enabled: true,
+      endpoint: "http://127.0.0.1:8080",
+      protocol: "http/protobuf",
+      serviceName: "openclaw-eval",
+      traces: true,
+      metrics: true,
+      logs: false,
+      sampleRate: 1.0,
+      flushIntervalMs: 1000,
+      captureContent: false,
+    },
+  },
+}

@@ -1,0 +1,54 @@
+// OpenClaw 2.0 (v2026.8.x) 的 OpenTelemetry 导出配置片段
+// 合并进 ~/.openclaw/openclaw.json（不要覆盖整个文件，保留你已有的模型/渠道/插件配置）
+//
+// 字段名以 v2026.8.x 官方源码为准（参考 extensions/diagnostics-otel/src/service-*.ts）：
+//   - protocol 仅支持 "http/protobuf"（gRPC 已废弃）
+//   - 内容捕获开关是 captureContent（不是早期第三方教程里的 captureMessageContent）
+//   - 默认不导出 prompt / 响应 / 工具输入输出原文，只导出有界的尺寸与 ID
+{
+  plugins: {
+    // 若你使用了 plugins.allow 白名单，务必把 diagnostics-otel 加进去，否则插件不会加载
+    allow: ["diagnostics-otel"],
+    entries: {
+      "diagnostics-otel": {
+        enabled: true,
+      },
+    },
+  },
+
+  diagnostics: {
+    enabled: true,
+    otel: {
+      enabled: true,
+
+      // AIOS 原生接收 OTLP/HTTP。控制台、API 与遥测只暴露一个 8080 端口。
+      endpoint: "http://127.0.0.1:8080",
+
+      // 仅 http/protobuf；gRPC 已废弃，别写 grpc
+      protocol: "http/protobuf",
+
+      // 可选：鉴权头，例如 Bearer token
+      // headers: { Authorization: "Bearer ${OTEL_TOKEN}" },
+
+      // 标识本实例；多实例/多环境时务必区分，评测环境建议带版本号
+      serviceName: "openclaw-eval",
+
+      // 三类信号开关。评测框架主要依赖 traces + metrics。
+      traces: true,
+      metrics: true,
+      logs: false,
+
+      // 采样率：评测要的是“每次运行完整可复现”，不要采样，设为 1.0。
+      // 线上高流量观测才需要降采样（如 0.2）。
+      sampleRate: 1.0,
+
+      // 指标导出间隔。评测跑完立刻落盘，建议调小到 1000ms（最小值）。
+      flushIntervalMs: 1000,
+
+      // 是否捕获 prompt / 响应 / 工具输入输出原文。
+      // 评测“工具参数正确率 / 中间产物质量”时必须开启；代价是敏感内容会离开本机，
+      // 仅在隔离评测沙箱、且采集端保留策略允许时开启。默认 false。
+      captureContent: false,
+    },
+  },
+}

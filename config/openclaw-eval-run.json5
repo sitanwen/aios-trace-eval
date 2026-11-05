@@ -1,0 +1,61 @@
+// Reproducible local smoke-run profile. It intentionally excludes channel,
+// memory and workspace plugins so an eval does not inherit slow sidecars.
+{
+  models: {
+    mode: "merge",
+    providers: {
+      deepseek: {
+        baseUrl: "https://api.deepseek.com",
+        api: "openai-completions",
+        models: [{
+          id: "deepseek-v4-flash",
+          name: "DeepSeek V4 Flash",
+          api: "openai-completions",
+          reasoning: true,
+          input: ["text"],
+          cost: { input: 0.14, output: 0.28, cacheRead: 0.028, cacheWrite: 0 },
+          contextWindow: 1000000,
+          maxTokens: 384000,
+          compat: {
+            supportsReasoningEffort: true,
+            supportsUsageInStreaming: true,
+            maxTokensField: "max_tokens",
+          },
+        }],
+      },
+    },
+  },
+  agents: {
+    defaults: {
+      model: { primary: "deepseek/deepseek-v4-flash", fallbacks: [] },
+      models: { "deepseek/deepseek-v4-flash": { alias: "DeepSeek" } },
+      modelPolicy: { allow: ["deepseek/deepseek-v4-flash"] },
+      // 改成你的项目绝对路径。
+      workspace: "D:/path/to/aios-trace-eval",
+      maxConcurrent: 1,
+      subagents: { maxConcurrent: 1 },
+    },
+  },
+  plugins: {
+    allow: ["deepseek", "diagnostics-otel"],
+    entries: {
+      deepseek: { enabled: true, config: {} },
+      "diagnostics-otel": { enabled: true, config: {} },
+    },
+  },
+  diagnostics: {
+    enabled: true,
+    otel: {
+      enabled: true,
+      endpoint: "http://127.0.0.1:8080",
+      protocol: "http/protobuf",
+      serviceName: "openclaw-eval",
+      traces: true,
+      metrics: true,
+      logs: false,
+      sampleRate: 1.0,
+      flushIntervalMs: 1000,
+      captureContent: false,
+    },
+  },
+}

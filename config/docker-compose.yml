@@ -1,0 +1,17 @@
+services:
+  aios-trace-eval:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: aios-trace-eval
+    environment:
+      AIOS_DB_PATH: /data/aios_eval.db
+      AIOS_WEB_DIR: /app/web
+    volumes:
+      - aios_data:/data
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
+volumes:
+  aios_data:

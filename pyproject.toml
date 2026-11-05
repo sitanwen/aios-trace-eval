@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aios-trace-eval"
+version = "0.2.0"
+description = "统一的 OpenClaw OpenTelemetry 可观测与评测控制台"
+requires-python = ">=3.10"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "uvicorn[standard]>=0.30,<1",
+  "protobuf>=5,<7",
+  "opentelemetry-proto>=1.28,<2",
+]
+
+[project.scripts]
+aios-trace-eval = "aios_trace_eval.__main__:main"
+aios-trace-eval-server = "aios_trace_eval.server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
