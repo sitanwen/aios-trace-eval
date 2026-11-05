@@ -169,6 +169,8 @@ def main() -> None:
         assert linked_trace["dataset_name"] == "selftest-dataset"
         linked_detail = client.get(f"/api/traces/{traces[0]['trace_id']}").json()["trace"]
         assert linked_detail["dataset_id"] == dataset.json()["dataset_id"]
+        assert linked_detail["input_text"] == "ping"
+        assert linked_detail["output_text"] == "pong"
         verdict = client.post(f"/api/traces/{traces[0]['trace_id']}/verdict", json={"status": "passed", "score": 1, "reason": "selftest"})
         assert verdict.status_code == 200
         overview = client.get("/api/overview").json()

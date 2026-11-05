@@ -6,6 +6,50 @@ const formatNumber=value=>new Intl.NumberFormat('zh-CN',{maximumFractionDigits:1
 const formatDuration=value=>value==null?'—':value>=1000?`${(value/1000).toFixed(1)} 秒`:`${Math.round(value)} 毫秒`;
 const formatDate=value=>value?new Date(value).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}):'—';
 const nsDate=value=>value?formatDate(Number(BigInt(value)/1000000n)):'—';
+const firstAttr=(attrs,keys)=>keys.map(key=>attrs?.[key]).find(value=>value!==undefined&&value!==null&&value!=='');
+function formatPayload(value){if(value==null)return'';if(typeof value!=='string')return JSON.stringify(value,null,2);try{return JSON.stringify(JSON.parse(value),null,2)}catch{return value}}
+function readableMessages(value,includeRole=true){
+  if(value==null)return'';
+  let parsed=value;
+  if(typeof value==='string'){try{parsed=JSON.parse(value)}catch{return value}}
+  if(!Array.isArray(parsed))return formatPayload(parsed);
+  const blocks=parsed.map(message=>{
+    const role=message?.role==='assistant'?'助手':message?.role==='user'?'用户':message?.role||'消息';
+    const content=Array.isArray(message?.content)?message.content.map(part=>part?.text??part?.content??formatPayload(part)).filter(Boolean).join('\n'):message?.content;
+    return content==null?'':`${includeRole?`${role}\n`:''}${typeof content==='string'?content:formatPayload(content)}`;
+  }).filter(Boolean);
+  return blocks.join('\n\n');
+}
+function capturedPayloads(detail){const run=detail.trace;let input=run.input_text||'',output=run.output_text||'';for(const span of detail.spans){const attrs=span.attributes||{};input=input||firstAttr(attrs,['openclaw.content.input_messages','gen_ai.input.messages','input.value'])||'';output=output||firstAttr(attrs,['openclaw.content.output_messages','gen_ai.output.messages','output.value'])||''}return{input:readableMessages(input,false),output:readableMessages(output,false)}}
+function traceStepInfo(span){
+  const attrs=span.attributes||{},name=span.name||'',operation=attrs['gen_ai.operation.name']||'';
+  const provider=attrs['openclaw.provider']||attrs['gen_ai.system']||'',model=attrs['openclaw.model']||attrs['gen_ai.request.model']||'';
+  const tool=attrs['gen_ai.tool.name']||attrs['openclaw.tool.name']||attrs['tool.name']||'';
+  const isTool=name.includes('tool')||operation==='execute_tool';
+  if(isTool)return{kind:'tool',label:'工具',title:`调用工具 ${tool||'（名称未采集）'}`,summary:`Agent 向工具发送参数并等待执行结果${span.status==='error'?'，该步骤发生错误':''}。`};
+  if(name.includes('context.assembled')){
+    const messages=attrs['openclaw.context.message_count']??0,prompt=attrs['openclaw.context.prompt_chars'],system=attrs['openclaw.context.system_prompt_chars'],tools=attrs['openclaw.model_call.prompt.tool_definitions_count'];
+    const parts=[`${messages} 条历史消息`,prompt!=null?`用户任务 ${formatNumber(prompt)} 字符`:null,system!=null?`系统提示 ${formatNumber(system)} 字符`:null,tools!=null?`${tools} 个可用工具`:null].filter(Boolean);
+    return{kind:'context',label:'上下文',title:'组装模型上下文',summary:`OpenClaw 已准备本次请求${parts.length?`：${parts.join('，')}`:''}。`};
+  }
+  if(name.includes('model.call')||operation){
+    const inputTokens=attrs['gen_ai.usage.input_tokens']??attrs['openclaw.model_call.usage.prompt_tokens'],outputTokens=attrs['gen_ai.usage.output_tokens']??attrs['openclaw.model_call.usage.output_tokens'],ttfb=attrs['openclaw.model_call.time_to_first_byte_ms'],tools=attrs['openclaw.model_call.prompt.tool_definitions_count'];
+    const parts=[inputTokens!=null?`输入 ${formatNumber(inputTokens)} Token`:null,outputTokens!=null?`输出 ${formatNumber(outputTokens)} Token`:null,tools!=null?`提供 ${tools} 个工具定义`:null,ttfb!=null?`首字节 ${formatDuration(ttfb)}`:null].filter(Boolean);
+    return{kind:'model',label:'模型',title:`调用 ${[provider,model].filter(Boolean).join(' / ')||'模型'}`,summary:`Agent 发起一次模型请求${parts.length?`，${parts.join('，')}`:''}。`};
+  }
+  if(name.includes('harness.run'))return{kind:'runtime',label:'运行',title:'启动 Agent 任务',summary:`OpenClaw Harness 接收任务并启动执行，入口为 ${attrs['openclaw.channel']||'未记录'}。`};
+  if(name==='openclaw.run')return{kind:'runtime',label:'Agent',title:'进入 Agent 主流程',summary:`由 ${attrs['openclaw.trigger']==='user'?'用户':'系统'}触发，使用 ${[provider,model].filter(Boolean).join(' / ')||'未记录模型'} 执行。`};
+  return{kind:'runtime',label:'步骤',title:name||'运行步骤',summary:'收到一个运行时 Trace 节点。'};
+}
+function traceStep(span,index){
+  const attrs=span.attributes||{},info=traceStepInfo(span),isTool=info.kind==='tool';
+  const input=firstAttr(attrs,isTool?['openclaw.content.tool_input','gen_ai.tool.call.arguments','tool.input']:['openclaw.content.input_messages','gen_ai.input.messages','input.value']);
+  const output=firstAttr(attrs,isTool?['openclaw.content.tool_output','gen_ai.tool.call.result','tool.output']:['openclaw.content.output_messages','gen_ai.output.messages','output.value']);
+  const statusText=span.status==='error'?'错误':span.status==='ok'?'完成':'已记录';
+  const content=input!=null||output!=null?`${input!=null?`<div class="payload-block"><label>${isTool?'调用参数':'模型输入'}</label><pre>${escapeHtml(isTool?formatPayload(input):readableMessages(input))}</pre></div>`:''}${output!=null?`<div class="payload-block"><label>${isTool?'工具返回':'模型输出'}</label><pre>${escapeHtml(isTool?formatPayload(output):readableMessages(output))}</pre></div>`:''}`:`<p class="step-no-content">此节点未采集正文，只展示真实遥测摘要。</p>`;
+  return`<article class="trace-step ${info.kind}-step ${span.status==='error'?'error':''}"><div class="trace-step-rail"><span>${index}</span></div><div class="trace-step-main"><div class="trace-step-head"><div><span class="step-kind">${info.label}</span><b>${escapeHtml(info.title)}</b></div><span>${formatDuration(span.duration_ms)} · ${statusText}</span></div><p class="trace-step-summary">${escapeHtml(info.summary)}</p>${content}<details class="raw-span"><summary>查看原始 Span 字段</summary><div><code>${escapeHtml(span.name)}</code><pre>${escapeHtml(JSON.stringify(attrs,null,2))}</pre></div></details></div></article>`;
+}
+function flowBoundary(kind,title,content,index){return`<article class="trace-step boundary-step ${kind}"><div class="trace-step-rail"><span>${index}</span></div><div class="trace-step-main"><div class="trace-step-head"><div><span class="step-kind">${kind==='user'?'输入':'回答'}</span><b>${title}</b></div></div><pre class="boundary-content">${escapeHtml(content)}</pre></div></article>`}
 
 const pages={
   overview:{title:'工作台',desc:'管理 Agent、数据集与评测实验'},
@@ -73,13 +117,23 @@ async function submitCase(event){const data=Object.fromEntries(new FormData(even
 async function openRun(id){
   const detail=await api('/api/traces/'+id),run=detail.trace,evaluations=detail.evaluations||[];
   $('#drawerTitle').textContent=run.case_name||run.case_id||run.run_id||'运行详情';
-  $('#drawerDesc').textContent=run.trace_id;
-  const evaluationHtml=evaluations.length?`<div class="detail-section"><h3>评测结论</h3><div class="evaluation-list">${evaluations.map(item=>`<div class="evaluation-row"><div><b>${escapeHtml(item.evaluator)}</b><span class="tag">${escapeHtml(item.evaluator_type)}</span></div><strong>${item.score==null?'—':item.score}</strong><p>${escapeHtml(item.reason||'未提供理由')}</p></div>`).join('')}</div></div>`:'';
+  $('#drawerDesc').textContent=`Trace ${run.trace_id}`;
+  const failedEvaluations=evaluations.filter(item=>!item.passed),passedEvaluations=evaluations.filter(item=>item.passed);
+  const verdictTitle=run.business_status==='passed'?'本次评测通过':run.business_status==='failed'?'本次评测未通过':'本次运行尚未评测';
+  const verdictReason=run.business_status==='passed'?`${passedEvaluations.length} 个自动评估器全部达到各自阈值。`:run.business_status==='failed'?`${failedEvaluations.length} 个评估器未达到阈值：${failedEvaluations.map(item=>item.evaluator).join('、')}。`:'已采集运行轨迹，但没有执行评估器。';
+  const verdictHtml=`<div class="verdict-card ${run.business_status}"><div>${status(run.business_status)}</div><section><b>${verdictTitle}</b><p>${escapeHtml(verdictReason)}</p></section><aside><span>综合分</span><strong>${run.score==null?'—':run.score}</strong></aside></div>`;
+  const evaluationHtml=evaluations.length?`<div class="detail-section"><div class="section-title"><h3>评测判定</h3><span>全部自动评估器通过，业务结果才算通过</span></div><div class="evaluation-list">${evaluations.map(item=>`<div class="evaluation-row ${item.passed?'passed':'failed'}"><div><b>${escapeHtml(item.evaluator)}</b><span class="tag">${escapeHtml(item.evaluator_type)}</span></div><strong>${item.passed?'通过':'失败'} · ${item.score==null?'—':item.score}</strong><p>${escapeHtml(item.reason||'未提供理由')}</p></div>`).join('')}</div></div>`:'';
   const contextHtml=run.dataset_name?`<div class="detail-section"><h3>评测上下文</h3><div class="detail-grid"><div><span>数据集</span><b>${escapeHtml(run.dataset_name)}</b></div><div><span>实验</span><b>${escapeHtml(run.experiment_name||'未关联实验')}</b></div><div><span>Case</span><b>${escapeHtml(run.case_name||run.case_id||'未关联')}</b></div></div></div>`:`<div class="notice-card"><div><b>未关联评测集</b><p>这是一条独立采集的 Trace，没有绑定数据集、实验或 Case，因此只展示可观测指标，不计入实验跑分。</p></div></div>`;
-  $('#drawerBody').innerHTML=`${contextHtml}<div class="detail-section"><h3>结果</h3><div class="detail-grid"><div><span>业务结果</span><b>${status(run.business_status)}</b></div><div><span>评分</span><b>${run.score==null?'未配置':run.score}</b></div><div><span>运行状态</span><b>${escapeHtml(run.runtime_status||'未知')}</b></div></div></div>${evaluationHtml}<div class="detail-section"><h3>效率</h3><div class="detail-grid detail-grid-four"><div><span>端到端耗时</span><b>${formatDuration(run.duration_ms)}</b></div><div><span>总 Token</span><b>${run.total_tokens==null?'未采集':formatNumber(run.total_tokens)}</b></div><div><span>TTFT</span><b>${formatDuration(run.ttft_ms)}</b></div><div><span>模型调用</span><b>${run.model_calls??'未采集'}</b></div></div></div><div class="detail-section"><h3>过程与风险</h3><div class="detail-grid detail-grid-four"><div><span>工具调用</span><b>${run.tool_calls??'未采集'}</b></div><div><span>工具错误</span><b>${run.tool_errors??'未采集'}</b></div><div><span>循环调用</span><b>${run.tool_loops??'未采集'}</b></div><div><span>Failover</span><b>${run.failovers??'未采集'}</b></div></div></div><h3>执行链路</h3><div class="span-list">${detail.spans.length?detail.spans.map(span=>`<div class="span-row ${span.name.includes('tool')?'tool':''} ${span.status==='error'?'error':''}"><b>${escapeHtml(span.name)}</b><small>${formatDuration(span.duration_ms)} · ${escapeHtml(span.status)}</small></div>`).join(''):'<p class="muted">没有收到 Span 明细</p>'}</div>`;
-  openDrawer();
+  const payloads=capturedPayloads(detail),steps=[];let stepIndex=1;
+  if(payloads.input)steps.push(flowBoundary('user','用户输入',payloads.input,stepIndex++));
+  detail.spans.forEach(span=>steps.push(traceStep(span,stepIndex++)));
+  if(payloads.output)steps.push(flowBoundary('assistant','Agent 最终回答',payloads.output,stepIndex++));
+  const missingContent=!payloads.input&&!payloads.output?`<div class="content-empty"><b>这条旧 Trace 没有采集输入输出正文</b><p>下方仍会根据真实 Span 属性解释每一步做了什么。开启 captureContent 后，新 Trace 会在对应模型和工具节点直接展示输入、参数、观察结果与最终回答。</p></div>`:'';
+  const trajectoryHtml=`<div class="detail-section trajectory-section"><div class="section-title"><h3>执行回放</h3><span>按真实发生顺序展示，不生成或猜测模型思考</span></div>${missingContent}<div class="trace-timeline">${steps.length?steps.join(''):'<p class="muted">没有收到 Span 明细</p>'}</div></div>`;
+  $('#drawerBody').innerHTML=`${verdictHtml}${contextHtml}${trajectoryHtml}${evaluationHtml}<div class="detail-section"><h3>运行指标</h3><div class="detail-grid detail-grid-four"><div><span>端到端耗时</span><b>${formatDuration(run.duration_ms)}</b></div><div><span>总 Token</span><b>${run.total_tokens==null?'未采集':formatNumber(run.total_tokens)}</b></div><div><span>首 Token / 字节</span><b>${formatDuration(run.ttft_ms)}</b></div><div><span>模型调用</span><b>${run.model_calls??'未采集'}</b></div><div><span>工具调用</span><b>${run.tool_calls??'未采集'}</b></div><div><span>工具错误</span><b>${run.tool_errors??'未采集'}</b></div><div><span>循环调用</span><b>${run.tool_loops??'未采集'}</b></div><div><span>Failover</span><b>${run.failovers??'未采集'}</b></div></div></div>`;
+  openDrawer('run');
 }
-function openDrawer(){$('#drawerBackdrop').classList.remove('hidden');$('#drawer').classList.add('open');$('#drawer').setAttribute('aria-hidden','false')}
+function openDrawer(mode=''){$('#drawerBackdrop').classList.remove('hidden');$('#drawer').classList.toggle('run-drawer',mode==='run');$('#drawer').classList.add('open');$('#drawer').setAttribute('aria-hidden','false')}
 function closeDrawer(){$('#drawerBackdrop').classList.add('hidden');$('#drawer').classList.remove('open');$('#drawer').setAttribute('aria-hidden','true')}
 function toast(message){const node=$('#toast');node.textContent=message;node.classList.add('show');clearTimeout(node.timer);node.timer=setTimeout(()=>node.classList.remove('show'),2400)}
 

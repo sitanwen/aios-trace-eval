@@ -404,6 +404,8 @@ def judge_trace(trace_id: str, body: JudgeRunInput) -> dict:
             "llm_score": llm_score,
             "rule_results": rule_results,
         },
+        input_text=case["input"],
+        output_text=body.actual_output,
     )
     if not changed:
         raise HTTPException(status_code=404, detail="trace not found")
@@ -522,7 +524,10 @@ def evaluate_trace(trace_id: str, body: EvaluationRunInput) -> dict:
     overall_score = round(sum(item["score"] for item in results) / len(results), 4)
     passed = all(item["passed"] for item in results)
     agent_name = experiment["experiment"]["agent_name"] if experiment else None
-    store.evaluate_trace(trace_id, body.case_id, results, passed, overall_score, body.experiment_id, agent_name)
+    store.evaluate_trace(
+        trace_id, body.case_id, results, passed, overall_score,
+        body.experiment_id, agent_name, case["input"], body.actual_output,
+    )
     return {"trace_id": trace_id, "case_id": body.case_id, "passed": passed,
             "score": overall_score, "results": results}
 

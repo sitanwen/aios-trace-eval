@@ -42,6 +42,8 @@ CREATE TABLE IF NOT EXISTS traces (
     failovers INTEGER NOT NULL DEFAULT 0,
     ttft_ms REAL,
     score REAL,
+    input_text TEXT,
+    output_text TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -274,6 +276,10 @@ class Store:
             ):
                 if name not in judge_columns:
                     db.execute(f"ALTER TABLE judge_models ADD COLUMN {name} {column_type}")
+            trace_columns = {row[1] for row in db.execute("PRAGMA table_info(traces)")}
+            for name in ("input_text", "output_text"):
+                if name not in trace_columns:
+                    db.execute(f"ALTER TABLE traces ADD COLUMN {name} TEXT")
             for evaluator in BUILTIN_EVALUATORS:
                 db.execute("""
                     INSERT OR IGNORE INTO evaluators(
@@ -463,13 +469,19 @@ class Store:
         score: float,
         experiment_id: Optional[str] = None,
         agent_name: Optional[str] = None,
+        input_text: Optional[str] = None,
+        output_text: Optional[str] = None,
     ) -> bool:
         with self._lock, self.connection() as db:
             changed = db.execute("""
                 UPDATE traces SET case_id=?, experiment_id=COALESCE(?, experiment_id),
-                    agent=COALESCE(?, agent), business_status=?, score=?
+                    agent=COALESCE(?, agent), business_status=?, score=?,
+                    input_text=COALESCE(?, input_text), output_text=COALESCE(?, output_text)
                 WHERE trace_id=?
-            """, (case_id, experiment_id, agent_name, "passed" if passed else "failed", score, trace_id)).rowcount
+            """, (
+                case_id, experiment_id, agent_name, "passed" if passed else "failed", score,
+                input_text, output_text, trace_id,
+            )).rowcount
             if not changed:
                 return False
             for result in results:
@@ -493,13 +505,16 @@ class Store:
         score: float,
         reason: str,
         evidence: Dict[str, Any],
+        input_text: Optional[str] = None,
+        output_text: Optional[str] = None,
     ) -> bool:
         status = "passed" if passed else "failed"
         with self._lock, self.connection() as db:
-            changed = db.execute(
-                "UPDATE traces SET case_id=?, business_status=?, score=? WHERE trace_id=?",
-                (case_id, status, score, trace_id),
-            ).rowcount
+            changed = db.execute("""
+                UPDATE traces SET case_id=?, business_status=?, score=?,
+                    input_text=COALESCE(?, input_text), output_text=COALESCE(?, output_text)
+                WHERE trace_id=?
+            """, (case_id, status, score, input_text, output_text, trace_id)).rowcount
             if changed:
                 db.execute("""
                     INSERT INTO eval_results(
