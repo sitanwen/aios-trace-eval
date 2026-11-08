@@ -23,6 +23,7 @@ from opentelemetry.proto.common.v1.common_pb2 import KeyValue, AnyValue
 from opentelemetry.proto.trace.v1.trace_pb2 import Status
 
 from aios_trace_eval.app import app
+from aios_trace_eval.experiment_runner import _openclaw_command
 
 
 def kv(key: str, value: str | int) -> KeyValue:
@@ -48,7 +49,32 @@ class FakeJudgeResponse:
         }).encode("utf-8")
 
 
+def test_runner_resolution() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        root = Path(temp_dir)
+        executable = root / ("openclaw.exe" if os.name == "nt" else "openclaw")
+        config = root / "openclaw.json5"
+        state = root / "state"
+        executable.write_bytes(b"")
+        executable.chmod(0o755)
+        config.write_text("{}\n", encoding="utf-8")
+        state.mkdir()
+        environment = {
+            "AIOS_OPENCLAW_COMMAND": str(executable),
+            "AIOS_OPENCLAW_CONFIG_PATH": str(config),
+            "AIOS_OPENCLAW_STATE_DIR": str(state),
+        }
+        command, _cwd = _openclaw_command(
+            "ping", "selftest-session", "main", 30, environment
+        )
+        assert command[0] == str(executable.resolve())
+        assert command[1:3] == ["agent", "--local"]
+        assert environment["OPENCLAW_CONFIG_PATH"] == str(config.resolve())
+        assert environment["OPENCLAW_STATE_DIR"] == str(state.resolve())
+
+
 def main() -> None:
+    test_runner_resolution()
     request = ExportTraceServiceRequest()
     rs = request.resource_spans.add()
     rs.resource.attributes.append(kv("service.name", "openclaw-eval"))

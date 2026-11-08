@@ -5,12 +5,13 @@ import argparse
 import hashlib
 import json
 import os
-import shutil
 import subprocess
 import time
 import urllib.request
 import uuid
 from pathlib import Path
+
+from aios_trace_eval.experiment_runner import _openclaw_command
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -108,29 +109,16 @@ def run_case(experiment: dict, case: dict, index: int) -> dict:
     before = {item["trace_id"] for item in request("/api/traces?limit=100")}
     prompt = case["input"] + "\n\nReturn only the final numeric answer."
     env = os.environ.copy()
-    gateway_token = env.get("OPENCLAW_GATEWAY_TOKEN")
-    if not gateway_token:
-        raise RuntimeError("请先设置 OPENCLAW_GATEWAY_TOKEN")
     env["OPENCLAW_GATEWAY_PORT"] = env.get("OPENCLAW_GATEWAY_PORT", "18790")
     if CONFIG is not None:
         env["OPENCLAW_CONFIG_PATH"] = str(CONFIG)
     if STATE is not None:
         env["OPENCLAW_STATE_DIR"] = str(STATE)
     session_id = f"gsm8k-{index + 1}-{uuid.uuid4().hex[:8]}"
-    executable = shutil.which("openclaw.cmd") if os.name == "nt" else shutil.which("openclaw")
-    if not executable:
-        raise RuntimeError("PATH 中找不到 openclaw")
-    command = [executable, "agent", "--agent", "main", "--session-id", session_id,
-               "--message", prompt, "--json", "--timeout", "120"]
-    if os.name == "nt":
-        node = shutil.which("node")
-        entry = Path(executable).parent / "node_modules" / "openclaw" / "openclaw.mjs"
-        if not node or not entry.exists():
-            raise RuntimeError("找不到 OpenClaw 的 Node.js 入口")
-        command = [node, str(entry), *command[1:]]
+    command, cwd = _openclaw_command(prompt, session_id, "main", 120, env)
     completed = subprocess.run(
         command,
-        cwd=ROOT, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=150,
+        cwd=cwd, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=150,
     )
     if completed.returncode:
         raise RuntimeError(completed.stderr.strip() or completed.stdout[-1000:])

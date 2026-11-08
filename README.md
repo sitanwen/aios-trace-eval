@@ -15,7 +15,7 @@ AIOS Trace Eval 是一个面向 OpenClaw 的 Agent 可观测与评测平台。�
 
 项目按 OpenClaw `2026.8.x` 的诊断配置结构实现。目前只对 `2026.8.2` 做过完整验证；使用更早或更新版本时，应先确认 `diagnostics.otel` 字段和插件版本是否兼容。
 
-平台核心使用 Python、FastAPI、SQLite 和原生浏览器 JavaScript，不依赖 Windows 专有组件。Docker 镜像基于 Linux，持续集成会在 Ubuntu 上使用 Python 3.10 和 3.12 执行完整自测。Windows 和 Linux 的差异只出现在环境变量写法及 OpenClaw 可执行文件解析中，批量 Runner 已分别处理 `openclaw.cmd` 和 `openclaw`。
+平台核心使用 Python、FastAPI、SQLite 和原生浏览器 JavaScript，不依赖 Windows 专有组件。持续集成会在 Ubuntu 上使用 Python 3.10 和 3.12 执行自测；实验 Runner 同时支持 Windows 的 `openclaw.cmd` 和 Linux 的 `openclaw`。
 
 ## 能做什么
 
@@ -40,15 +40,25 @@ cd aios-trace-eval/config
 docker compose up --build -d
 ```
 
-或者直接运行 Python 服务：
+或者直接运行 Python 服务。Linux：
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e .
+aios-trace-eval serve --host 0.0.0.0 --port 8080
+```
+
+Windows PowerShell：
 
 ```powershell
 python -m venv .venv
 .venv\Scripts\activate
-pip install -r requirements.txt
-$env:PYTHONPATH = "src"
-python -m aios_trace_eval serve --host 0.0.0.0 --port 8080
+python -m pip install -e .
+aios-trace-eval serve --host 0.0.0.0 --port 8080
 ```
+
+Docker Compose 默认用于运行控制台、API 和 OTLP 接收端。页面中的“运行实验”会调用平台进程所在环境里的 OpenClaw；需要使用该功能时，最直接的方式是在同一台 Linux 主机按上面的 Python 方式运行平台，并完成下面的 Runner 配置。
 
 服务包含以下入口：
 
@@ -80,7 +90,44 @@ openclaw plugins doctor
 
 OpenClaw 与 `diagnostics-otel` 建议使用相同版本，避免配置结构或遥测字段不一致。
 
-### 3. 配置 OpenClaw
+### 3. 配置实验 Runner
+
+平台默认使用 `openclaw agent --local` 执行数据集 Case，不依赖单独运行的 Gateway。OpenClaw、模型配置和独立状态目录必须能被平台进程访问。
+
+Linux：
+
+```bash
+npm install -g openclaw@2026.8.2
+mkdir -p /var/lib/aios-trace-eval/openclaw-state
+
+export AIOS_OPENCLAW_CONFIG_PATH=/etc/openclaw/openclaw.json5
+export AIOS_OPENCLAW_STATE_DIR=/var/lib/aios-trace-eval/openclaw-state
+export AIOS_OPENCLAW_MODE=local
+
+aios-trace-eval serve --host 0.0.0.0 --port 8080
+```
+
+Windows PowerShell：
+
+```powershell
+$env:AIOS_OPENCLAW_CONFIG_PATH = "D:\openclaw\openclaw.json5"
+$env:AIOS_OPENCLAW_STATE_DIR = "D:\openclaw\eval-state"
+$env:AIOS_OPENCLAW_MODE = "local"
+
+aios-trace-eval serve --host 0.0.0.0 --port 8080
+```
+
+Runner 按以下顺序查找 OpenClaw：
+
+1. `AIOS_OPENCLAW_COMMAND` 指定的可执行文件；
+2. `AIOS_OPENCLAW_ROOT/node_modules/openclaw/openclaw.mjs`；
+3. 当前 `PATH` 中的 `openclaw.cmd` 或 `openclaw`。
+
+`AIOS_OPENCLAW_STATE_DIR` 必须是已存在的独立目录。不同 OpenClaw 版本不要共用 state：旧版本读取由新版本升级过的 SQLite 数据库时会因 schema 不兼容而拒绝启动。`AIOS_OPENCLAW_CONFIG_PATH` 应指向包含模型和 OTLP 配置的真实配置文件。
+
+只有在已经单独管理 Gateway 时才设置 `AIOS_OPENCLAW_MODE=gateway`；此时还需要提供对应的 `OPENCLAW_GATEWAY_PORT` 和认证配置。
+
+### 4. 配置 OpenClaw 遥测
 
 将 [config/openclaw-otel.json5](config/openclaw-otel.json5) 中的内容合并到现有 `openclaw.json`，不要直接覆盖原有模型、渠道和 Agent 配置。
 
@@ -129,7 +176,7 @@ headers: {
 }
 ```
 
-### 4. 重启并验证
+### 5. 重启并验证
 
 重启 OpenClaw Gateway 或对应的 OpenClaw 进程，然后执行一次真实 Agent 任务。验证顺序：
 
@@ -200,19 +247,19 @@ normalize_number(response) == normalize_number(reference)
 1. 下载 OpenAI 官方 GSM8K `test.jsonl`。
 2. 校验文件 SHA-256。
 3. 创建数据集、Case 和评估器。
-4. 通过本地 OpenClaw Gateway 逐条运行。
+4. 通过与页面实验按钮相同的 OpenClaw Runner 逐条运行。
 5. 等待完整 OTLP Trace。
 6. 执行数值正确性、Token、时延和工具错误评分。
 7. 输出并保存实验汇总。
 
-运行前需已启动 AIOS Trace Eval 和 OpenClaw Gateway，并提供 Gateway 连接信息：
+运行前需已启动 AIOS Trace Eval，并按“配置实验 Runner”设置 OpenClaw 配置和独立状态目录：
 
 Linux / macOS：
 
 ```bash
 export PYTHONPATH=src
-export OPENCLAW_GATEWAY_TOKEN="<Gateway Token>"
-export OPENCLAW_GATEWAY_PORT=18790
+export AIOS_OPENCLAW_CONFIG_PATH=/etc/openclaw/openclaw.json5
+export AIOS_OPENCLAW_STATE_DIR=/var/lib/aios-trace-eval/openclaw-state
 python scripts/run_gsm8k_openclaw.py --limit 5
 ```
 
@@ -220,8 +267,8 @@ Windows PowerShell：
 
 ```powershell
 $env:PYTHONPATH = "src"
-$env:OPENCLAW_GATEWAY_TOKEN = "<Gateway Token>"
-$env:OPENCLAW_GATEWAY_PORT = "18790"
+$env:AIOS_OPENCLAW_CONFIG_PATH = "D:\openclaw\openclaw.json5"
+$env:AIOS_OPENCLAW_STATE_DIR = "D:\openclaw\eval-state"
 python scripts/run_gsm8k_openclaw.py --limit 5
 ```
 
@@ -230,9 +277,8 @@ python scripts/run_gsm8k_openclaw.py --limit 5
 ```bash
 python scripts/run_gsm8k_openclaw.py \
   --api-url https://eval.example.com \
-  --gateway-port 18790 \
   --openclaw-config /etc/openclaw/openclaw.json \
-  --openclaw-state-dir /var/lib/openclaw \
+  --openclaw-state-dir /var/lib/aios-trace-eval/openclaw-state \
   --limit 5
 ```
 
