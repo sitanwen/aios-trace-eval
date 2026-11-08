@@ -33,7 +33,7 @@ def _attrs(values: Iterable[Any]) -> Dict[str, Any]:
     return {item.key: _any_value(item.value) for item in values}
 
 
-def decode_traces(payload: bytes, content_type: str) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+def decode_traces(payload: bytes, content_type: str) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
     try:
         from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
         from google.protobuf.json_format import Parse
@@ -73,6 +73,36 @@ def decode_traces(payload: bytes, content_type: str) -> Tuple[List[Dict[str, Any
     for span in normalized_spans:
         grouped[span["trace_id"]].append(span)
 
+    process_samples: List[Dict[str, Any]] = []
+    for span in normalized_spans:
+        attrs = span["_attributes"]
+        resource = resources.get(span["trace_id"], {})
+        for attribute, metric_name, unit in (
+            ("openclaw.phase.cpu_core_ratio", "openclaw.phase.cpu_core_ratio", "1"),
+            ("openclaw.phase.cpu_total_ms", "openclaw.phase.cpu_total_ms", "ms"),
+            ("openclaw.liveness.cpu_core_ratio", "openclaw.liveness.cpu_core_ratio", "1"),
+            ("openclaw.liveness.event_loop_utilization", "openclaw.liveness.event_loop_utilization", "1"),
+        ):
+            value = _number(attrs, attribute)
+            if value is None:
+                continue
+            sample_attrs = {
+                key: value for key, value in attrs.items()
+                if key in {"openclaw.phase", "openclaw.liveness.reason"}
+            }
+            process_samples.append({
+                "service_name": str(resource.get("service.name", "openclaw")),
+                "metric_name": metric_name,
+                "timestamp_ns": span["ended_at_ns"],
+                "value": value,
+                "count": 1,
+                "sum_value": value,
+                "min_value": value,
+                "max_value": value,
+                "unit": unit,
+                "attributes_json": json.dumps(sample_attrs, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+            })
+
     run_groups = {
         trace_id: spans for trace_id, spans in grouped.items()
         if _is_run_trace(spans)
@@ -81,7 +111,7 @@ def decode_traces(payload: bytes, content_type: str) -> Tuple[List[Dict[str, Any
     normalized_spans = [span for span in normalized_spans if span["trace_id"] in run_groups]
     for span in normalized_spans:
         span.pop("_attributes", None)
-    return traces, normalized_spans
+    return traces, normalized_spans, process_samples
 
 
 def _is_run_trace(spans: List[Dict[str, Any]]) -> bool:

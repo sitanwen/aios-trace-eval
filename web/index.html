@@ -4,23 +4,28 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>AIOS Agent Eval</title>
-  <link rel="stylesheet" href="/assets/app.css?v=20261106-5" />
+  <link rel="stylesheet" href="/assets/app.css?v=20261108-2" />
 </head>
 <body>
   <div class="layout">
     <aside class="sidebar">
-      <a class="logo" href="#overview"><span>AI</span><strong>AIOS</strong></a>
+      <a class="logo" href="#overview"><span>AI</span><strong>AIOS-eval</strong></a>
       <nav id="nav">
         <a href="#overview" data-page="overview"><i>⌂</i>工作台</a>
         <a href="#agents" data-page="agents"><i>◇</i>Agent</a>
         <a href="#datasets" data-page="datasets"><i>▤</i>数据集</a>
         <a href="#judges" data-page="judges"><i>✦</i>评测模型</a>
-        <a href="#evaluators" data-page="evaluators"><i>✓</i>评估器</a>
+        <a href="#evaluators" data-page="evaluators"><i>✓</i>评测指标</a>
         <a href="#experiments" data-page="experiments"><i>◎</i>评测实验</a>
-        <a href="#metrics" data-page="metrics"><i>⊕</i>指标体系</a>
         <a href="#runs" data-page="runs"><i>≡</i>运行记录</a>
       </nav>
-      <div class="sidebar-bottom"><span class="online"></span>OTLP 服务正常</div>
+      <div class="sidebar-bottom">
+        <div class="otlp-status-row">
+          <span id="otlpStatusDot" class="otlp-status-dot idle"></span>
+          <div><b id="otlpStatusText">OTLP 接收端</b><small id="otlpStatusDetail">尚未检测</small></div>
+        </div>
+        <button id="checkOtlp" class="otlp-check-button" type="button">检测</button>
+      </div>
     </aside>
 
     <main>
@@ -64,7 +69,7 @@
 
       <section id="page-evaluators" class="page">
         <div class="notice-card evaluator-intro">
-          <div><b>指标定义与执行逻辑分离</b><p>规则评估器负责可复核门禁，LLM 评估器负责语义与 Rubric，轨迹评估器分析工具和步骤。一个实验可组合多个评估器。</p></div>
+          <div><b>这里的每一项都会真正参与评分</b><p>创建实验时选择指标；每个 Case 运行后按指标分别打分。所有自动指标都达到通过阈值，该 Case 才标记为通过。</p></div>
           <div id="evaluatorSummary" class="mini-summary"></div>
         </div>
         <div class="toolbar evaluator-toolbar">
@@ -76,18 +81,6 @@
 
       <section id="page-experiments" class="page">
         <div id="experimentList" class="resource-list"></div>
-      </section>
-
-      <section id="page-metrics" class="page">
-        <div id="metricSummary" class="dimension-grid"></div>
-        <div class="panel metric-panel">
-          <div class="panel-head"><div><h3>指标目录</h3><p>明确每项指标的证据来源；没有证据时不生成数值</p></div></div>
-          <div id="metricCatalog"></div>
-        </div>
-        <div class="panel vendor-panel">
-          <div class="panel-head"><div><h3>行业方案对照</h3><p>基于四家平台分析提炼其设计重点与缺口</p></div></div>
-          <div id="vendorCompare"></div>
-        </div>
       </section>
 
       <section id="page-runs" class="page">
@@ -113,6 +106,6 @@
     <div id="drawerBody" class="drawer-body"></div>
   </aside>
   <div id="toast" class="toast"></div>
-  <script src="/assets/app.js?v=20261106-5" defer></script>
+  <script src="/assets/app.js?v=20261108-2" defer></script>
 </body>
 </html>

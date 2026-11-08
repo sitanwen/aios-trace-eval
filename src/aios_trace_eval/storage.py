@@ -66,6 +66,23 @@ CREATE TABLE IF NOT EXISTS spans (
 
 CREATE INDEX IF NOT EXISTS idx_spans_trace ON spans(trace_id, started_at_ns);
 
+CREATE TABLE IF NOT EXISTS metric_samples (
+    service_name TEXT NOT NULL,
+    metric_name TEXT NOT NULL,
+    timestamp_ns INTEGER NOT NULL,
+    value REAL NOT NULL,
+    count INTEGER,
+    sum_value REAL,
+    min_value REAL,
+    max_value REAL,
+    unit TEXT NOT NULL DEFAULT '',
+    attributes_json TEXT NOT NULL DEFAULT '{}',
+    PRIMARY KEY (service_name, metric_name, timestamp_ns, attributes_json)
+);
+
+CREATE INDEX IF NOT EXISTS idx_metric_samples_window
+ON metric_samples(service_name, timestamp_ns, metric_name);
+
 CREATE TABLE IF NOT EXISTS experiments (
     experiment_id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -327,6 +344,142 @@ class Store:
         with self._lock, self.connection() as db:
             db.executemany(sql, [[row[column] for column in columns] for row in rows])
 
+    def upsert_metric_samples(self, samples: Iterable[Dict[str, Any]]) -> None:
+        rows = list(samples)
+        if not rows:
+            return
+        columns = list(rows[0])
+        placeholders = ", ".join("?" for _ in columns)
+        update = ", ".join(
+            f"{column}=excluded.{column}"
+            for column in columns
+            if column not in {"service_name", "metric_name", "timestamp_ns", "attributes_json"}
+        )
+        sql = (
+            f"INSERT INTO metric_samples ({', '.join(columns)}) VALUES ({placeholders}) "
+            f"ON CONFLICT(service_name, metric_name, timestamp_ns, attributes_json) "
+            f"DO UPDATE SET {update}"
+        )
+        with self._lock, self.connection() as db:
+            db.executemany(sql, [[row[column] for column in columns] for row in rows])
+
+    def _runtime_metrics(self, db: sqlite3.Connection, trace: Dict[str, Any]) -> Dict[str, Any]:
+        padding_ns = 10_000_000_000
+        rows = [dict(row) for row in db.execute("""
+            SELECT metric_name, timestamp_ns, value, count, sum_value, min_value, max_value, unit,
+                   attributes_json
+            FROM metric_samples
+            WHERE service_name=? AND timestamp_ns BETWEEN ? AND ?
+              AND metric_name IN (
+                'openclaw.memory.rss_bytes',
+                'openclaw.memory.heap_used_bytes',
+                'openclaw.liveness.cpu_core_ratio',
+                'openclaw.phase.cpu_core_ratio',
+                'openclaw.process.cpu_core_ratio',
+                'openclaw.phase.cpu_total_ms',
+                'openclaw.liveness.event_loop_utilization'
+              )
+            ORDER BY timestamp_ns
+        """, (
+            trace["service_name"],
+            trace["started_at_ns"] - padding_ns,
+            trace["ended_at_ns"] + padding_ns,
+        )).fetchall()]
+
+        def summary(name: str, prefer_same_host: bool = False) -> Optional[Dict[str, Any]]:
+            matched = [row for row in rows if row["metric_name"] == name]
+            local = [row for row in matched if '"aios.resource.source":"same_host_process"' in row["attributes_json"]]
+            using_local = prefer_same_host and bool(local)
+            if using_local:
+                matched = local
+            matched = [
+                row for row in matched
+                if trace["started_at_ns"] <= row["timestamp_ns"] <= trace["ended_at_ns"]
+            ]
+            if not matched:
+                return None
+            weighted_count = sum(row["count"] or 1 for row in matched)
+            weighted_sum = sum(
+                row["sum_value"] if row["sum_value"] is not None else row["value"]
+                for row in matched
+            )
+            peaks = [
+                row["max_value"] if row["max_value"] is not None else row["value"]
+                for row in matched
+            ]
+            return {
+                "average": weighted_sum / weighted_count,
+                "peak": max(peaks),
+                "sample_count": weighted_count,
+                "point_count": len(matched),
+                "unit": matched[0]["unit"],
+                "source": "same_host_process" if using_local else "otel",
+            }
+
+        def combined_summary(*names: str) -> Optional[Dict[str, Any]]:
+            values = [summary(name) for name in names]
+            values = [value for value in values if value]
+            if not values:
+                return None
+            return {
+                "average": sum(value["average"] * value["sample_count"] for value in values)
+                / sum(value["sample_count"] for value in values),
+                "peak": max(value["peak"] for value in values),
+                "sample_count": sum(value["sample_count"] for value in values),
+                "point_count": sum(value["point_count"] for value in values),
+                "unit": values[0]["unit"],
+            }
+
+        def series(name: str, prefer_same_host: bool = False) -> Dict[str, Any]:
+            matched = [row for row in rows if row["metric_name"] == name]
+            local = [row for row in matched if '"aios.resource.source":"same_host_process"' in row["attributes_json"]]
+            using_local = prefer_same_host and bool(local)
+            if using_local:
+                matched = local
+            selected = [
+                row for row in matched
+                if trace["started_at_ns"] <= row["timestamp_ns"] <= trace["ended_at_ns"]
+            ]
+            unique: Dict[int, Dict[str, Any]] = {row["timestamp_ns"]: row for row in selected}
+            points = [{
+                "offset_ms": round((timestamp - trace["started_at_ns"]) / 1_000_000, 3),
+                "value": row["value"],
+            } for timestamp, row in sorted(unique.items())]
+            return {
+                "points": points,
+                "trace_duration_ms": trace["duration_ms"],
+                "source": "same_host_process" if using_local else "otel",
+            }
+
+        def first_series(*names: str) -> Dict[str, Any]:
+            for name in names:
+                result = series(name, prefer_same_host=name == "openclaw.process.cpu_core_ratio")
+                if result["points"]:
+                    return result
+            return {"points": [], "trace_duration_ms": trace["duration_ms"], "source": "otel"}
+
+        return {
+            "scope": "gateway_process",
+            "sample_scope": "trace_interval",
+            "service_name": trace["service_name"],
+            "window_padding_ms": 10000,
+            "rss_bytes": summary("openclaw.memory.rss_bytes", prefer_same_host=True),
+            "rss_series": series("openclaw.memory.rss_bytes", prefer_same_host=True),
+            "heap_used_bytes": summary("openclaw.memory.heap_used_bytes"),
+            "cpu_core_ratio": combined_summary(
+                "openclaw.process.cpu_core_ratio",
+                "openclaw.phase.cpu_core_ratio",
+                "openclaw.liveness.cpu_core_ratio"
+            ),
+            "cpu_series": first_series(
+                "openclaw.process.cpu_core_ratio",
+                "openclaw.phase.cpu_core_ratio",
+                "openclaw.liveness.cpu_core_ratio",
+            ),
+            "cpu_total_ms": summary("openclaw.phase.cpu_total_ms"),
+            "event_loop_utilization": summary("openclaw.liveness.event_loop_utilization"),
+        }
+
     def overview(self) -> Dict[str, Any]:
         with self.connection() as db:
             totals = dict(db.execute("""
@@ -368,6 +521,19 @@ class Store:
                 FROM traces GROUP BY model ORDER BY runs DESC LIMIT 8
             """).fetchall()]
         return {"totals": totals, "trend": trend, "models": models}
+
+    def otlp_health(self) -> Dict[str, Any]:
+        with self.connection() as db:
+            last_trace_at_ns = db.execute(
+                "SELECT MAX(started_at_ns) FROM traces"
+            ).fetchone()[0]
+            last_metric_at_ns = db.execute(
+                "SELECT MAX(timestamp_ns) FROM metric_samples"
+            ).fetchone()[0]
+        return {
+            "last_trace_at_ns": last_trace_at_ns,
+            "last_metric_at_ns": last_metric_at_ns,
+        }
 
     def list_traces(self, limit: int = 100, status: Optional[str] = None, query: str = "") -> List[Dict[str, Any]]:
         where: List[str] = []
@@ -425,7 +591,17 @@ class Store:
                 ) latest ON latest.latest_id=r.id
                 ORDER BY r.id
             """, (trace_id,)).fetchall()]
-        return {"trace": dict(trace_row), "spans": spans, "evaluations": evals}
+            trace = dict(trace_row)
+            runtime_metrics = self._runtime_metrics(db, trace)
+        return {"trace": trace, "spans": spans, "evaluations": evals, "runtime_metrics": runtime_metrics}
+
+    def delete_trace(self, trace_id: str) -> bool:
+        """Remove one exact trace; used to clean up an OTLP self-test probe."""
+        with self._lock, self.connection() as db:
+            changed = db.execute(
+                "DELETE FROM traces WHERE trace_id=?", (trace_id,)
+            ).rowcount
+        return bool(changed)
 
     def set_verdict(self, trace_id: str, status: str, score: Optional[float], reason: str) -> bool:
         if status not in {"passed", "failed", "ungraded"}:
@@ -656,6 +832,40 @@ class Store:
         result = dict(evaluator)
         result["config"] = json.loads(result.pop("config_json"))
         return result
+
+    def update_evaluator(
+        self, evaluator_id: str, evaluator: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        with self._lock, self.connection() as db:
+            exists = db.execute(
+                "SELECT 1 FROM evaluators WHERE evaluator_id=?", (evaluator_id,)
+            ).fetchone()
+            if not exists:
+                return None
+            if evaluator.get("judge_model_id"):
+                judge_exists = db.execute(
+                    "SELECT 1 FROM judge_models WHERE judge_model_id=?",
+                    (evaluator["judge_model_id"],),
+                ).fetchone()
+                if not judge_exists:
+                    raise KeyError("judge model not found")
+            db.execute("""
+                UPDATE evaluators SET
+                    name=:name,
+                    description=:description,
+                    evaluator_type=:evaluator_type,
+                    dimension=:dimension,
+                    score_min=:score_min,
+                    score_max=:score_max,
+                    pass_threshold=:pass_threshold,
+                    judge_model_id=:judge_model_id,
+                    prompt_template=:prompt_template,
+                    config_json=:config_json,
+                    version=version+1,
+                    status='active'
+                WHERE evaluator_id=:evaluator_id
+            """, {**evaluator, "evaluator_id": evaluator_id})
+        return self.get_evaluator(evaluator_id)
 
     def list_datasets(self) -> List[Dict[str, Any]]:
         with self.connection() as db:

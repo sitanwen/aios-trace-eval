@@ -18,6 +18,7 @@ sys.path.insert(0, "src")
 
 from fastapi.testclient import TestClient
 from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
+from opentelemetry.proto.collector.metrics.v1.metrics_service_pb2 import ExportMetricsServiceRequest
 from opentelemetry.proto.common.v1.common_pb2 import KeyValue, AnyValue
 from opentelemetry.proto.trace.v1.trace_pb2 import Status
 
@@ -89,6 +90,39 @@ def main() -> None:
     )
     tool.attributes.extend([kv("gen_ai.operation.name", "execute_tool"), kv("gen_ai.tool.name", "echo")])
 
+    metric_request = ExportMetricsServiceRequest()
+    rm = metric_request.resource_metrics.add()
+    rm.resource.attributes.append(kv("service.name", "openclaw-eval"))
+    sm = rm.scope_metrics.add()
+    for name, unit, value in (
+        ("openclaw.memory.rss_bytes", "By", 134_217_728),
+        ("openclaw.memory.heap_used_bytes", "By", 67_108_864),
+        ("openclaw.liveness.cpu_core_ratio", "1", 0.42),
+        ("openclaw.liveness.event_loop_utilization", "1", 0.17),
+    ):
+        metric = sm.metrics.add(name=name, unit=unit)
+        point = metric.histogram.data_points.add(
+            start_time_unix_nano=1_000_000_000,
+            time_unix_nano=3_000_000_000,
+            count=1,
+            sum=value,
+            min=value,
+            max=value,
+        )
+        if name == "openclaw.memory.rss_bytes":
+            for timestamp, outside_value in (
+                (500_000_000, 536_870_912),
+                (4_500_000_000, 805_306_368),
+            ):
+                outside = metric.histogram.data_points.add(
+                    start_time_unix_nano=timestamp,
+                    time_unix_nano=timestamp,
+                    count=1,
+                    sum=outside_value,
+                    min=outside_value,
+                    max=outside_value,
+                )
+
     with TestClient(app) as client:
         agent = client.post("/api/agents", json={
             "name": "selftest-agent", "endpoint": "http://127.0.0.1:18789", "description": ""
@@ -145,14 +179,30 @@ def main() -> None:
         assert len(experiments) == 1
         assert experiments[0]["judge_model_name"] == "selftest-judge"
         assert experiments[0]["evaluator_count"] == 1
+        run_state = client.get(f"/api/experiments/{experiment.json()['experiment_id']}/run")
+        assert run_state.status_code == 200, run_state.text
+        assert run_state.json()["state"] == "idle"
         response = client.post("/v1/traces", content=request.SerializeToString(), headers={"content-type": "application/x-protobuf"})
         assert response.status_code == 200, response.text
+        metric_response = client.post(
+            "/v1/metrics",
+            content=metric_request.SerializeToString(),
+            headers={"content-type": "application/x-protobuf"},
+        )
+        assert metric_response.status_code == 200, metric_response.text
         traces = client.get("/api/traces").json()
         assert len(traces) == 1
         assert traces[0]["total_tokens"] == 1000
         assert traces[0]["tool_calls"] == 1
         detail = client.get(f"/api/traces/{traces[0]['trace_id']}").json()
         assert len(detail["spans"]) == 3
+        assert detail["runtime_metrics"]["rss_bytes"]["peak"] == 134_217_728
+        assert len(detail["runtime_metrics"]["rss_series"]["points"]) == 1
+        assert detail["runtime_metrics"]["rss_series"]["points"][0]["offset_ms"] == 2000
+        assert detail["runtime_metrics"]["sample_scope"] == "trace_interval"
+        assert detail["runtime_metrics"]["heap_used_bytes"]["peak"] == 67_108_864
+        assert detail["runtime_metrics"]["cpu_core_ratio"]["peak"] == 0.42
+        assert len(detail["runtime_metrics"]["cpu_series"]["points"]) == 1
         with patch(
             "aios_trace_eval.app.urllib.request.urlopen",
             return_value=FakeJudgeResponse('{"passed":true,"score":1.0,"reason":"matches"}'),

@@ -248,7 +248,11 @@ python scripts/run_gsm8k_openclaw.py \
 | 端到端耗时 | Run Trace 最早 Span 到最晚 Span 的时间 |
 | TTFT | 模型请求到首个输出的时间，前提是 OpenClaw 上报该字段 |
 | 工具错误 | 状态为 error 或 blocked 的工具 Span 数量 |
+| RSS / Heap | 与 Trace 同一 `service.name` 的 Gateway 进程资源采样；不是单请求独占内存 |
+| CPU 核心占用 | 进程 CPU 使用率除以单核容量，使用多个核心时可以超过 100% |
 | 综合分 | 当前为已执行自动评估器得分的算术平均值 |
+
+OpenClaw 与平台部署在同一台主机时，平台会从 OTLP 连接自动识别 Gateway 进程并补充 CPU、RSS 采样，Windows 与 Linux 均使用相同实现。分开部署时，资源指标应由 OpenClaw 所在主机上报；平台只按 `service.name` 和 Trace 时间窗口关联，不会把平台服务器自身的资源消耗冒充为 Agent 消耗。
 
 “Runtime 完成”和“业务通过”是两个不同概念。模型成功返回内容不代表答案正确，也不代表任务目标已经完成。
 

@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import os
+import asyncio
 import json
+import secrets
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -15,9 +18,12 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from . import experiment_runner
 from .otlp import decode_traces
 from .storage import Store
 from .metrics import catalog
+from .otlp_metrics import decode_metrics
+from .local_resource import sample_local_process
 from .code_eval import UnsafeExpression, evaluate_expression
 
 
@@ -27,6 +33,8 @@ WEB_DIR = Path(os.environ.get("AIOS_WEB_DIR", ROOT / "web"))
 store = Store(DATA_PATH)
 
 app = FastAPI(title="AIOS Trace Eval", version="0.2.0")
+_RUN_STATES: dict[str, dict] = {}
+_RUN_LOCK = threading.Lock()
 
 
 class VerdictInput(BaseModel):
@@ -106,6 +114,114 @@ def health() -> dict:
     return {"status": "ok", "storage": "sqlite", "otlp": True}
 
 
+@app.get("/api/health/otlp")
+def otlp_health() -> dict:
+    health = store.otlp_health()
+    latest_ns = max(
+        value for value in (
+            health.get("last_trace_at_ns"), health.get("last_metric_at_ns")
+        ) if value is not None
+    ) if any(value is not None for value in health.values()) else None
+    recent_window_seconds = 60
+    receiving_recently = bool(
+        latest_ns and time.time_ns() - int(latest_ns) <= recent_window_seconds * 1_000_000_000
+    )
+    return {
+        "status": "ok",
+        "receiver": "ready",
+        "storage": "ok",
+        "traces_endpoint": "/v1/traces",
+        "metrics_endpoint": "/v1/metrics",
+        "last_trace_at_ns": health.get("last_trace_at_ns"),
+        "last_metric_at_ns": health.get("last_metric_at_ns"),
+        "receiving_recently": receiving_recently,
+        "recent_window_seconds": recent_window_seconds,
+        "checked_at_ns": time.time_ns(),
+    }
+
+
+def _send_otlp_probe(url: str, payload: bytes) -> int:
+    probe_request = urllib.request.Request(
+        url,
+        data=payload,
+        method="POST",
+        headers={"Content-Type": "application/x-protobuf"},
+    )
+    with urllib.request.urlopen(probe_request, timeout=8) as response:
+        response.read()
+        return int(response.status)
+
+
+@app.post("/api/health/otlp/test")
+async def test_otlp_end_to_end(request: Request) -> dict:
+    try:
+        from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import (
+            ExportTraceServiceRequest,
+        )
+        from opentelemetry.proto.trace.v1.trace_pb2 import Span
+    except ImportError as exc:
+        raise HTTPException(status_code=503, detail="OTLP protobuf 依赖不可用") from exc
+
+    trace_id_bytes = secrets.token_bytes(16)
+    span_id_bytes = secrets.token_bytes(8)
+    trace_id = trace_id_bytes.hex()
+    started_at_ns = time.time_ns()
+    export = ExportTraceServiceRequest()
+    resource_spans = export.resource_spans.add()
+    service_name = resource_spans.resource.attributes.add()
+    service_name.key = "service.name"
+    service_name.value.string_value = "aios-otlp-self-test"
+    scope_spans = resource_spans.scope_spans.add()
+    scope_spans.scope.name = "aios.otlp.self-test"
+    span = scope_spans.spans.add()
+    span.trace_id = trace_id_bytes
+    span.span_id = span_id_bytes
+    span.name = "aios.otlp.self_test"
+    span.kind = Span.SPAN_KIND_INTERNAL
+    span.start_time_unix_nano = started_at_ns
+    span.end_time_unix_nano = started_at_ns + 1_000_000
+    span.status.code = 1
+    marker = span.attributes.add()
+    marker.key = "aios.self_test"
+    marker.value.bool_value = True
+
+    server_host, server_port = request.scope.get("server") or ("127.0.0.1", 8080)
+    if server_host in {"0.0.0.0", "::", "localhost"}:
+        server_host = "127.0.0.1"
+    if ":" in str(server_host):
+        server_host = f"[{server_host}]"
+    receiver_url = f"http://{server_host}:{server_port}/v1/traces"
+    test_started = time.perf_counter()
+    inserted = False
+    try:
+        response_status = await asyncio.to_thread(
+            _send_otlp_probe, receiver_url, export.SerializeToString()
+        )
+        if response_status != 200:
+            raise RuntimeError(f"OTLP 接收端返回 HTTP {response_status}")
+        stored = store.get_trace(trace_id)
+        inserted = stored is not None
+        if not inserted:
+            raise RuntimeError("OTLP 请求成功，但测试 Trace 未写入数据库")
+        spans = stored.get("spans") or []
+        if not any(item.get("span_id") == span_id_bytes.hex() for item in spans):
+            raise RuntimeError("测试 Trace 已写入，但 Span 回查失败")
+        return {
+            "status": "passed",
+            "receiver_http": "passed",
+            "protobuf_decode": "passed",
+            "storage_write": "passed",
+            "trace_readback": "passed",
+            "latency_ms": round((time.perf_counter() - test_started) * 1000, 1),
+            "tested_at_ns": time.time_ns(),
+        }
+    except (urllib.error.URLError, TimeoutError, RuntimeError) as exc:
+        raise HTTPException(status_code=503, detail=f"OTLP 端到端检测失败：{exc}") from exc
+    finally:
+        if inserted:
+            store.delete_trace(trace_id)
+
+
 @app.get("/api/overview")
 def overview() -> dict:
     return store.overview()
@@ -169,6 +285,74 @@ def update_experiment_status(experiment_id: str, body: ExperimentStatusInput) ->
         raise HTTPException(status_code=404, detail="experiment not found")
     store.set_experiment_status(experiment_id, body.status)
     return {"experiment_id": experiment_id, "status": body.status}
+
+
+def _experiment_worker(experiment_id: str, detail: dict, base_url: str,
+                       gateway_port: str, openclaw_agent: str) -> None:
+    def progress(state: str, completed: int, total: int, current: str,
+                 error: str | None) -> None:
+        with _RUN_LOCK:
+            _RUN_STATES[experiment_id] = {
+                "state": state, "total": total, "completed": completed,
+                "current_case": current, "error": error,
+            }
+    try:
+        experiment_runner.run_experiment(
+            base_url=base_url, experiment=detail["experiment"], cases=detail["cases"],
+            gateway_port=gateway_port, agent=openclaw_agent, on_progress=progress,
+        )
+        store.set_experiment_status(experiment_id, "completed")
+        progress("completed", len(detail["cases"]), len(detail["cases"]), "", None)
+    except Exception as exc:
+        store.set_experiment_status(experiment_id, "failed")
+        with _RUN_LOCK:
+            previous = _RUN_STATES.get(experiment_id, {})
+            _RUN_STATES[experiment_id] = {
+                **previous, "state": "failed", "error": str(exc)[:800],
+            }
+
+
+@app.post("/api/experiments/{experiment_id}/run", status_code=202)
+def start_experiment_run(experiment_id: str, request: Request) -> dict:
+    detail = store.get_eval_experiment(experiment_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="experiment not found")
+    if not detail["cases"]:
+        raise HTTPException(status_code=400, detail="数据集还没有 Case，无法运行")
+    with _RUN_LOCK:
+        current = _RUN_STATES.get(experiment_id)
+        if current and current.get("state") == "running":
+            raise HTTPException(status_code=409, detail="实验正在运行中")
+        _RUN_STATES[experiment_id] = {
+            "state": "running", "total": len(detail["cases"]), "completed": 0,
+            "current_case": "", "error": None,
+        }
+    store.set_experiment_status(experiment_id, "running")
+    base_url = os.environ.get("AIOS_BASE_URL") or str(request.base_url).rstrip("/")
+    gateway_port = experiment_runner.gateway_port_from_endpoint(
+        detail["experiment"].get("agent_endpoint") or "",
+        os.environ.get("OPENCLAW_GATEWAY_PORT", "18790"),
+    )
+    threading.Thread(
+        target=_experiment_worker,
+        args=(experiment_id, detail, base_url, gateway_port,
+              os.environ.get("OPENCLAW_AGENT", "main")),
+        daemon=True,
+    ).start()
+    return {"experiment_id": experiment_id, "state": "running",
+            "total": len(detail["cases"]), "gateway_port": gateway_port}
+
+
+@app.get("/api/experiments/{experiment_id}/run")
+def experiment_run_status(experiment_id: str) -> dict:
+    if store.get_eval_experiment(experiment_id) is None:
+        raise HTTPException(status_code=404, detail="experiment not found")
+    with _RUN_LOCK:
+        state = dict(_RUN_STATES[experiment_id]) if experiment_id in _RUN_STATES else None
+    return {"experiment_id": experiment_id, **(state or {
+        "state": "idle", "total": 0, "completed": 0,
+        "current_case": "", "error": None,
+    })}
 
 
 @app.get("/api/agents")
@@ -258,8 +442,7 @@ def evaluators() -> list:
     return store.list_evaluators()
 
 
-@app.post("/api/evaluators", status_code=201)
-def create_evaluator(body: EvaluatorInput) -> dict:
+def _validate_evaluator(body: EvaluatorInput) -> None:
     if body.evaluator_type not in {"rule", "trajectory_rule", "llm", "code", "human"}:
         raise HTTPException(status_code=400, detail="unsupported evaluator type")
     if body.dimension not in {"result", "process", "efficiency", "risk"}:
@@ -275,11 +458,23 @@ def create_evaluator(body: EvaluatorInput) -> dict:
             })
         except (UnsafeExpression, ValueError, TypeError) as exc:
             raise HTTPException(status_code=400, detail=f"无效的 Code 表达式：{exc}") from exc
+
+
+def _evaluator_values(body: EvaluatorInput) -> dict:
     values = body.model_dump(exclude={"config"})
     values.update({
-        "evaluator_id": f"evaluator_{uuid.uuid4().hex[:12]}",
         "judge_model_id": body.judge_model_id or None,
         "config_json": json.dumps(body.config, ensure_ascii=False),
+    })
+    return values
+
+
+@app.post("/api/evaluators", status_code=201)
+def create_evaluator(body: EvaluatorInput) -> dict:
+    _validate_evaluator(body)
+    values = _evaluator_values(body)
+    values.update({
+        "evaluator_id": f"evaluator_{uuid.uuid4().hex[:12]}",
         "version": 1,
         "status": "active",
         "is_builtin": 0,
@@ -288,6 +483,18 @@ def create_evaluator(body: EvaluatorInput) -> dict:
         return store.create_evaluator(values)
     except KeyError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.put("/api/evaluators/{evaluator_id}")
+def update_evaluator(evaluator_id: str, body: EvaluatorInput) -> dict:
+    _validate_evaluator(body)
+    try:
+        result = store.update_evaluator(evaluator_id, _evaluator_values(body))
+    except KeyError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if result is None:
+        raise HTTPException(status_code=404, detail="evaluator not found")
+    return result
 
 
 @app.post("/api/traces/{trace_id}/judge")
@@ -430,8 +637,9 @@ def _compare(actual: object, operator: str, expected: object) -> bool:
     return bool(operations[operator]())
 
 
-def _run_llm_evaluator(evaluator: dict, case: dict, actual_output: str, trace_row: dict) -> tuple[bool, float, str, dict]:
-    judge_id = evaluator.get("judge_model_id")
+def _run_llm_evaluator(evaluator: dict, case: dict, actual_output: str, trace_row: dict,
+                       default_judge_id: str | None = None) -> tuple[bool, float, str, dict]:
+    judge_id = evaluator.get("judge_model_id") or default_judge_id
     if not judge_id:
         raise ValueError("LLM 评估器未绑定 Judge 模型")
     judge = store.get_judge_model_secret(judge_id)
@@ -475,6 +683,7 @@ def evaluate_trace(trace_id: str, body: EvaluationRunInput) -> dict:
     if case is None:
         raise HTTPException(status_code=404, detail="case not found")
     experiment = store.get_eval_experiment(body.experiment_id) if body.experiment_id else None
+    default_judge_id = experiment["experiment"].get("judge_model_id") if experiment else None
     evaluator_ids = body.evaluator_ids or ([item["evaluator_id"] for item in experiment["evaluators"]] if experiment else [])
     if not evaluator_ids:
         raise HTTPException(status_code=400, detail="至少选择一个评估器")
@@ -510,7 +719,9 @@ def evaluate_trace(trace_id: str, body: EvaluationRunInput) -> dict:
                 reason = f"受限表达式结果：{value!r}"
                 evidence = {"expression": expression, "value": value}
             elif kind == "llm":
-                ok, score, reason, evidence = _run_llm_evaluator(evaluator, case, body.actual_output, trace_row)
+                ok, score, reason, evidence = _run_llm_evaluator(
+                    evaluator, case, body.actual_output, trace_row, default_judge_id,
+                )
             elif kind == "human":
                 continue
             else:
@@ -581,18 +792,32 @@ def create_experiment(body: ExperimentInput) -> dict:
 async def receive_traces(request: Request) -> Response:
     payload = await request.body()
     try:
-        traces_data, spans_data = decode_traces(payload, request.headers.get("content-type", "application/x-protobuf"))
+        traces_data, spans_data, process_samples = decode_traces(
+            payload, request.headers.get("content-type", "application/x-protobuf")
+        )
         for item in traces_data:
             store.upsert_trace(item)
         store.upsert_spans(spans_data)
+        store.upsert_metric_samples(process_samples)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"invalid OTLP trace payload: {exc}") from exc
     return Response(content=b"", media_type="application/x-protobuf", status_code=200)
 
 
 @app.post("/v1/metrics")
-async def receive_metrics(_: Request) -> Response:
-    # Run-level metrics are derived from trace attributes to avoid double counting.
+async def receive_metrics(request: Request) -> Response:
+    payload = await request.body()
+    try:
+        samples = decode_metrics(payload, request.headers.get("content-type", "application/x-protobuf"))
+        store.upsert_metric_samples(samples)
+        if samples and request.client:
+            store.upsert_metric_samples(sample_local_process(
+                request.client.host,
+                request.client.port,
+                samples[0]["service_name"],
+            ))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"invalid OTLP metric payload: {exc}") from exc
     return Response(content=b"", media_type="application/x-protobuf", status_code=200)
 
 
