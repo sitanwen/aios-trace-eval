@@ -88,7 +88,7 @@ class CanonicalRun:
             "agent": self.agent,
             "provider": self.provider,
             "model": self.model,
-            "started_at_ns": self.started_at,
+            "started_at_ns": self.started_at_ns,
             "ended_at_ns": self.ended_at_ns,
             "duration_ms": self.duration_ms,
             "runtime_status": self.runtime_status,
