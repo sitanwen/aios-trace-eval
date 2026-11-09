@@ -43,10 +43,28 @@ def _execute_cli(
         if not explicit_executable.is_file():
             raise RuntimeError(f"{runtime_type} 可执行文件不存在：{explicit_executable}")
         command[0] = str(explicit_executable.resolve())
-    elif shutil.which(executable, path=environment.get("PATH")) is None:
-        raise RuntimeError(
-            f"找不到 {runtime_type} CLI：{executable}。请安装后加入 PATH，或在 Agent 配置中填写可执行文件。"
-        )
+    else:
+        resolved = shutil.which(executable, path=environment.get("PATH"))
+        if resolved is None:
+            raise RuntimeError(
+                f"找不到 {runtime_type} CLI：{executable}。请安装后加入 PATH，或在 Agent 配置中填写可执行文件。"
+            )
+        command[0] = resolved
+    # npm exposes .cmd launchers on Windows. Launch the package entry directly
+    # so dataset input never needs to pass through cmd.exe string parsing.
+    if os.name == "nt" and runtime_type in {"dsh", "claude_code"}:
+        npm_root = Path(command[0]).parent / "node_modules"
+        if runtime_type == "dsh":
+            entry = npm_root / "@deepseek-ai" / "dsh" / "lib" / "bin.js"
+            node = shutil.which("node", path=environment.get("PATH"))
+            if not entry.is_file() or node is None:
+                raise RuntimeError("DSH npm 启动入口不完整，请重新安装 @deepseek-ai/dsh")
+            command = [node, str(entry), *command[1:]]
+        elif runtime_type == "claude_code":
+            entry = npm_root / "@anthropic-ai" / "claude-code" / "bin" / "claude.exe"
+            if not entry.is_file():
+                raise RuntimeError("Claude Code npm 启动入口不完整，请重新安装 @anthropic-ai/claude-code")
+            command = [str(entry), *command[1:]]
     if cwd and not Path(cwd).expanduser().is_dir():
         raise RuntimeError(f"Agent 工作目录不存在：{cwd}")
     process = subprocess.Popen(
