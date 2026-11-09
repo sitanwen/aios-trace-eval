@@ -11,9 +11,31 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from ..canonical import CanonicalRun
+
+
+@dataclass(frozen=True)
+class AdapterCapabilities:
+    """Product-facing capabilities exposed by an adapter."""
+
+    observe: bool = True
+    execute: bool = False
+    process_metrics: bool = False
+    execution_modes: tuple[str, ...] = ("observe_only",)
+
+
+@dataclass
+class ExecutionPlan:
+    """Everything the runner needs to execute one case safely."""
+
+    command: List[str]
+    cwd: Optional[str] = None
+    environment: Dict[str, str] = field(default_factory=dict)
+    output_format: str = "text"
+    resource_scope: str = "process_tree"
 
 
 class AgentAdapter(ABC):
@@ -21,6 +43,7 @@ class AgentAdapter(ABC):
 
     #: 适配器唯一标识，用于注册表查找与手动指定。
     name: str = ""
+    capabilities = AdapterCapabilities()
 
     #: 归一化时优先读取的标准 GenAI 语义字段，厂商私有字段仅作兜底。
     def __init__(self) -> None:
@@ -68,6 +91,21 @@ class AgentAdapter(ABC):
         仅观测型平台（无本地可执行体）不需要实现。
         """
         raise NotImplementedError(f"{self.name} 不支持本地任务执行")
+
+    def build_execution(
+        self,
+        case: Dict[str, Any],
+        context: Dict[str, Any],
+    ) -> ExecutionPlan:
+        """Build a complete plan while preserving the legacy command API."""
+        return ExecutionPlan(
+            command=self.build_command(case, context),
+            cwd=context.get("working_directory") or None,
+        )
+
+    def parse_output(self, stdout: str, stderr: str = "") -> str:
+        """Extract the final agent response from CLI output."""
+        return stdout.strip()
 
     # -- 资源采样（可选）-------------------------------------------------
     def extract_process_samples(

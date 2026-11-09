@@ -30,7 +30,7 @@ OTLP 接收与 protobuf 解码对所有平台一致。平台差异仅存在于�
 
 - 归一化：私有 span 名与属性 → 统一模型；
 - 任务执行：构造该平台的非交互启动命令；
-- 资源采样：平台自报的进程级 CPU/内存（可选）。
+- 资源采样：Local CLI 由 Runner 按根 PID 与全部子进程采样；Gateway 使用服务进程指标。
 
 ## 3. 统一规范模型
 
@@ -45,17 +45,26 @@ OTLP 接收与 protobuf 解码对所有平台一致。平台差异仅存在于�
 - `detect(spans, resource)`：返回 0–1 匹配置信度，用于自动探测；
 - `is_run_trace(spans)`：排除自诊断、独立 accounting 等非任务 trace；
 - `normalize_run(spans, resource, trace_id)`：归一化为 CanonicalRun；
-- `build_command(case, context)`：构造非交互执行命令；
+- `build_execution(case, context)`：构造命令、工作目录与输出约定；
 - `extract_process_samples(spans, resource)`：进程资源采样（可选）。
+
+Trace 关联按执行模型区分：
+
+- OpenClaw Gateway 不继承启动 CLI 时的资源属性，按执行前后的新增 Trace、时间窗和完成状态关联；
+- Claude Code / DSH Local CLI 是 Runner 的直接子进程，优先使用继承的关联属性精确匹配；
+- 如果 CLI 插件没有导出关联属性，降级为同 `service.name` 的新增 Trace，并按模型调用、Token 与跨度选择主 Trace。
+
+`run_id` 只作为平台内部 Attempt 标识。Gateway 关联不依赖它，资源曲线也由
+Attempt 与最终 Trace 的显式关系完成关联。
 
 ## 5. 已支持平台
 
 | 适配器 | 运行时 | 采集方式 | 非交互命令 |
 |---|---|---|---|
 | `generic` | 任意标准 GenAI 输出 | 标准 `gen_ai.*` | 由具体平台决定 |
-| `dsh` | DeepSeek Harness | `@loongsuite/dsh-plugin`，进程内 OTLP | `dsh --profile headless` |
-| `claude_code` | Claude Code | 内置 OTel，环境变量启用 | `claude --print` |
-| `openclaw` | OpenClaw | 待迁移（现位于 otlp/extractor） | 现有 runner |
+| `dsh` | DeepSeek Harness | 插件 Trace + Runner 进程树采样 | `dsh --profile headless` |
+| `claude_code` | Claude Code | 内置 OTel Trace + Runner 进程树采样 | `claude --print` |
+| `openclaw` | OpenClaw | Gateway OTel | Gateway runner |
 
 ## 6. Token 口径差异（归一化必须处理）
 
@@ -74,11 +83,10 @@ OTLP 接收与 protobuf 解码对所有平台一致。平台差异仅存在于�
 - `total = input + output + cache_read + cache_write`；
 - 工具仅以 `claude_code.tool` 计数，子 span 不重复统计。
 
-## 7. 实施路径
+## 7. 运行模式
 
-1. 本阶段：规范模型、适配器契约、注册表、generic/dsh/claude_code 适配器，
-   纯新增，不改动现有核心，主流程行为不变；
-2. 下一阶段：将 OpenClaw 归一化逻辑迁入 `adapters/openclaw`，otlp/extractor
-   改为调用注册表，保持自测全绿；
-3. 接入实验 Runner：按平台适配器的 `build_command` 替换硬编码命令；
-4. 配置样例、文档与 CI 矩阵按平台展开。
+- `gateway`：OpenClaw 等持久服务；资源数据代表共享 Gateway 进程。
+- `local_cli`：Claude Code / DSH 的推荐评测方式；平台启动进程、采集进程树并取得最终输出。
+- `observe_only`：只接收外部 Trace，不允许平台主动执行数据集。
+
+Remote Worker 尚未作为产品能力开放；在协议、鉴权和心跳完成前不在前端展示。

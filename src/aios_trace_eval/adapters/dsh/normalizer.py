@@ -12,7 +12,7 @@ from typing import Any, Dict, List
 
 from ...canonical import CanonicalRun, CanonicalSpan, CanonicalTokens
 from .. import _spanutil as su
-from ..base import AgentAdapter
+from ..base import AdapterCapabilities, AgentAdapter
 from . import fields as F
 
 
@@ -20,6 +20,11 @@ class DSHAdapter(AgentAdapter):
     """DeepSeek Harness 适配器。"""
 
     name = "dsh"
+    capabilities = AdapterCapabilities(
+        execute=True,
+        process_metrics=True,
+        execution_modes=("local_cli", "remote_worker", "observe_only"),
+    )
 
     @classmethod
     def detect(cls, spans: List[Dict[str, Any]], resource: Dict[str, Any]) -> float:
@@ -141,7 +146,7 @@ class DSHAdapter(AgentAdapter):
     ) -> List[str]:
         # headless profile：新建持久化会话，打印最终回答后退出，适用于批量评测
         profile = str(context.get("profile", "headless"))
-        command = ["dsh", "--profile", profile]
+        command = [str(context.get("executable") or "dsh"), "--profile", profile]
         extra = context.get("extra_args")
         if extra:
             command.extend([str(x) for x in extra])

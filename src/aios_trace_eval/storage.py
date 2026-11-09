@@ -70,6 +70,7 @@ CREATE INDEX IF NOT EXISTS idx_spans_trace ON spans(trace_id, started_at_ns);
 
 CREATE TABLE IF NOT EXISTS metric_samples (
     service_name TEXT NOT NULL,
+    run_id TEXT NOT NULL DEFAULT '',
     metric_name TEXT NOT NULL,
     timestamp_ns INTEGER NOT NULL,
     value REAL NOT NULL,
@@ -84,7 +85,6 @@ CREATE TABLE IF NOT EXISTS metric_samples (
 
 CREATE INDEX IF NOT EXISTS idx_metric_samples_window
 ON metric_samples(service_name, timestamp_ns, metric_name);
-
 CREATE TABLE IF NOT EXISTS experiments (
     experiment_id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -113,6 +113,11 @@ CREATE TABLE IF NOT EXISTS eval_agents (
     description TEXT NOT NULL DEFAULT '',
     endpoint TEXT NOT NULL,
     protocol TEXT NOT NULL DEFAULT 'openclaw_gateway',
+    runtime_type TEXT NOT NULL DEFAULT 'openclaw',
+    execution_mode TEXT NOT NULL DEFAULT 'gateway',
+    executable TEXT NOT NULL DEFAULT '',
+    working_directory TEXT NOT NULL DEFAULT '',
+    config_json TEXT NOT NULL DEFAULT '{}',
     auth_type TEXT NOT NULL DEFAULT 'none',
     status TEXT NOT NULL DEFAULT 'configured',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -341,6 +346,33 @@ class Store:
                 db.execute("ALTER TABLE eval_attempts ADD COLUMN run_batch_id TEXT")
             db.execute("CREATE INDEX IF NOT EXISTS idx_eval_attempts_run_batch "
                        "ON eval_attempts(run_batch_id)")
+            metric_columns = {row[1] for row in db.execute("PRAGMA table_info(metric_samples)")}
+            if "run_id" not in metric_columns:
+                db.execute("ALTER TABLE metric_samples ADD COLUMN run_id TEXT NOT NULL DEFAULT ''")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_metric_samples_run "
+                       "ON metric_samples(run_id, timestamp_ns, metric_name)")
+            agent_columns = {row[1] for row in db.execute("PRAGMA table_info(eval_agents)")}
+            for name, definition in (
+                ("runtime_type", "TEXT NOT NULL DEFAULT 'openclaw'"),
+                ("execution_mode", "TEXT NOT NULL DEFAULT 'gateway'"),
+                ("executable", "TEXT NOT NULL DEFAULT ''"),
+                ("working_directory", "TEXT NOT NULL DEFAULT ''"),
+                ("config_json", "TEXT NOT NULL DEFAULT '{}'"),
+            ):
+                if name not in agent_columns:
+                    db.execute(f"ALTER TABLE eval_agents ADD COLUMN {name} {definition}")
+            db.execute("""
+                UPDATE eval_agents
+                SET runtime_type=CASE
+                    WHEN protocol='openclaw_gateway' THEN 'openclaw'
+                    ELSE protocol
+                END
+                WHERE protocol IN ('openclaw_gateway','openclaw','claude_code','dsh','generic')
+            """)
+            db.execute("""
+                UPDATE eval_agents SET execution_mode='local_cli'
+                WHERE runtime_type IN ('claude_code','dsh') AND execution_mode='gateway'
+            """)
             for evaluator in BUILTIN_EVALUATORS:
                 db.execute("""
                     INSERT OR IGNORE INTO evaluators(
@@ -556,37 +588,49 @@ class Store:
 
     def _runtime_metrics(self, db: sqlite3.Connection, trace: Dict[str, Any]) -> Dict[str, Any]:
         padding_ns = 10_000_000_000
+        attempt = db.execute(
+            "SELECT run_id FROM eval_attempts WHERE trace_id=? ORDER BY started_at_ns DESC LIMIT 1",
+            (trace["trace_id"],),
+        ).fetchone()
+        run_id = attempt["run_id"] if attempt else ""
         rows = [dict(row) for row in db.execute("""
-            SELECT metric_name, timestamp_ns, value, count, sum_value, min_value, max_value, unit,
-                   attributes_json
+            SELECT run_id, metric_name, timestamp_ns, value, count, sum_value,
+                   min_value, max_value, unit, attributes_json
             FROM metric_samples
-            WHERE service_name=? AND timestamp_ns BETWEEN ? AND ?
+            WHERE timestamp_ns BETWEEN ? AND ?
+              AND (run_id=? OR (run_id='' AND service_name=?))
               AND metric_name IN (
+                'process.memory.rss',
+                'process.cpu.utilization',
                 'openclaw.memory.rss_bytes',
                 'openclaw.memory.heap_used_bytes',
                 'openclaw.liveness.cpu_core_ratio',
                 'openclaw.phase.cpu_core_ratio',
                 'openclaw.process.cpu_core_ratio',
-                'openclaw.phase.cpu_total_ms',
-                'openclaw.liveness.event_loop_utilization'
+                'openclaw.phase.cpu_total_ms'
               )
             ORDER BY timestamp_ns
         """, (
-            trace["service_name"],
             trace["started_at_ns"] - padding_ns,
             trace["ended_at_ns"] + padding_ns,
+            run_id,
+            trace["service_name"],
         )).fetchall()]
+        exact_run_rows = [row for row in rows if run_id and row["run_id"] == run_id]
+        if exact_run_rows:
+            rows = exact_run_rows
 
-        def summary(name: str, prefer_same_host: bool = False) -> Optional[Dict[str, Any]]:
+        def source_of(row: Dict[str, Any]) -> str:
+            try:
+                return json.loads(row["attributes_json"]).get("aios.resource.source", "otel")
+            except (TypeError, ValueError):
+                return "otel"
+
+        def summary(name: str) -> Optional[Dict[str, Any]]:
             matched = [row for row in rows if row["metric_name"] == name]
-            local = [row for row in matched if '"aios.resource.source":"same_host_process"' in row["attributes_json"]]
-            using_local = prefer_same_host and bool(local)
-            if using_local:
-                matched = local
-            matched = [
-                row for row in matched
-                if trace["started_at_ns"] <= row["timestamp_ns"] <= trace["ended_at_ns"]
-            ]
+            if not exact_run_rows:
+                matched = [row for row in matched
+                           if trace["started_at_ns"] <= row["timestamp_ns"] <= trace["ended_at_ns"]]
             if not matched:
                 return None
             weighted_count = sum(row["count"] or 1 for row in matched)
@@ -604,8 +648,15 @@ class Store:
                 "sample_count": weighted_count,
                 "point_count": len(matched),
                 "unit": matched[0]["unit"],
-                "source": "same_host_process" if using_local else "otel",
+                "source": source_of(matched[0]),
             }
+
+        def first_summary(*names: str) -> Optional[Dict[str, Any]]:
+            for name in names:
+                result = summary(name)
+                if result:
+                    return result
+            return None
 
         def combined_summary(*names: str) -> Optional[Dict[str, Any]]:
             values = [summary(name) for name in names]
@@ -621,54 +672,54 @@ class Store:
                 "unit": values[0]["unit"],
             }
 
-        def series(name: str, prefer_same_host: bool = False) -> Dict[str, Any]:
+        def series(name: str) -> Dict[str, Any]:
             matched = [row for row in rows if row["metric_name"] == name]
-            local = [row for row in matched if '"aios.resource.source":"same_host_process"' in row["attributes_json"]]
-            using_local = prefer_same_host and bool(local)
-            if using_local:
-                matched = local
-            selected = [
+            selected = matched if exact_run_rows else [
                 row for row in matched
                 if trace["started_at_ns"] <= row["timestamp_ns"] <= trace["ended_at_ns"]
             ]
             unique: Dict[int, Dict[str, Any]] = {row["timestamp_ns"]: row for row in selected}
+            series_start = min(unique, default=trace["started_at_ns"])
+            series_end = max(unique, default=trace["ended_at_ns"])
             points = [{
-                "offset_ms": round((timestamp - trace["started_at_ns"]) / 1_000_000, 3),
+                "offset_ms": round((timestamp - series_start) / 1_000_000, 3),
                 "value": row["value"],
             } for timestamp, row in sorted(unique.items())]
             return {
                 "points": points,
-                "trace_duration_ms": trace["duration_ms"],
-                "source": "same_host_process" if using_local else "otel",
+                "trace_duration_ms": round((series_end - series_start) / 1_000_000, 3),
+                "source": source_of(selected[0]) if selected else "otel",
             }
 
         def first_series(*names: str) -> Dict[str, Any]:
             for name in names:
-                result = series(name, prefer_same_host=name == "openclaw.process.cpu_core_ratio")
+                result = series(name)
                 if result["points"]:
                     return result
             return {"points": [], "trace_duration_ms": trace["duration_ms"], "source": "otel"}
 
+        scope = "process_tree" if exact_run_rows else "gateway_process"
         return {
-            "scope": "gateway_process",
-            "sample_scope": "trace_interval",
+            "scope": scope,
+            "sample_scope": "run" if exact_run_rows else "trace_interval",
             "service_name": trace["service_name"],
             "window_padding_ms": 10000,
-            "rss_bytes": summary("openclaw.memory.rss_bytes", prefer_same_host=True),
-            "rss_series": series("openclaw.memory.rss_bytes", prefer_same_host=True),
+            "rss_bytes": first_summary("process.memory.rss", "openclaw.memory.rss_bytes"),
+            "rss_series": first_series("process.memory.rss", "openclaw.memory.rss_bytes"),
             "heap_used_bytes": summary("openclaw.memory.heap_used_bytes"),
-            "cpu_core_ratio": combined_summary(
+            "cpu_core_ratio": first_summary(
+                "process.cpu.utilization",
                 "openclaw.process.cpu_core_ratio",
                 "openclaw.phase.cpu_core_ratio",
                 "openclaw.liveness.cpu_core_ratio"
             ),
             "cpu_series": first_series(
+                "process.cpu.utilization",
                 "openclaw.process.cpu_core_ratio",
                 "openclaw.phase.cpu_core_ratio",
                 "openclaw.liveness.cpu_core_ratio",
             ),
             "cpu_total_ms": summary("openclaw.phase.cpu_total_ms"),
-            "event_loop_utilization": summary("openclaw.liveness.event_loop_utilization"),
         }
 
     def experiment_resource_series(self, experiment_id: str) -> Dict[str, Any]:
@@ -694,21 +745,39 @@ class Store:
                 if not trace_bounds or trace_bounds[0] is None or trace_bounds[1] is None:
                     return empty
                 start_ns, end_ns = trace_bounds
-            service_name = db.execute(
-                "SELECT MIN(service_name) FROM traces WHERE experiment_id=?", (experiment_id,)
-            ).fetchone()[0] or "openclaw"
-            rows = [dict(row) for row in db.execute("""
-                SELECT metric_name, timestamp_ns, value, attributes_json
-                FROM metric_samples
-                WHERE service_name=? AND timestamp_ns BETWEEN ? AND ?
-                  AND metric_name IN (
-                      'openclaw.memory.rss_bytes',
-                      'openclaw.process.cpu_core_ratio',
-                      'openclaw.phase.cpu_core_ratio',
-                      'openclaw.liveness.cpu_core_ratio'
-                  )
-                ORDER BY timestamp_ns
-            """, (service_name, start_ns, end_ns)).fetchall()]
+            run_ids = [row[0] for row in db.execute(
+                "SELECT run_id FROM eval_attempts WHERE experiment_id=?", (experiment_id,)
+            ).fetchall()]
+            if run_ids:
+                placeholders = ",".join("?" for _ in run_ids)
+                rows = [dict(row) for row in db.execute(f"""
+                    SELECT metric_name, timestamp_ns, value, attributes_json
+                    FROM metric_samples
+                    WHERE run_id IN ({placeholders})
+                      AND metric_name IN (
+                          'process.memory.rss', 'process.cpu.utilization',
+                          'openclaw.memory.rss_bytes', 'openclaw.process.cpu_core_ratio',
+                          'openclaw.phase.cpu_core_ratio', 'openclaw.liveness.cpu_core_ratio'
+                      )
+                    ORDER BY timestamp_ns
+                """, run_ids).fetchall()]
+            else:
+                service_name = db.execute(
+                    "SELECT MIN(service_name) FROM traces WHERE experiment_id=?", (experiment_id,)
+                ).fetchone()[0] or "openclaw"
+                rows = [dict(row) for row in db.execute("""
+                    SELECT metric_name, timestamp_ns, value, attributes_json
+                    FROM metric_samples
+                    WHERE service_name=? AND timestamp_ns BETWEEN ? AND ?
+                      AND metric_name IN (
+                          'openclaw.memory.rss_bytes', 'openclaw.process.cpu_core_ratio',
+                          'openclaw.phase.cpu_core_ratio', 'openclaw.liveness.cpu_core_ratio'
+                      )
+                    ORDER BY timestamp_ns
+                """, (service_name, start_ns, end_ns)).fetchall()]
+            if rows:
+                start_ns = min(start_ns, rows[0]["timestamp_ns"])
+                end_ns = max(end_ns, rows[-1]["timestamp_ns"])
 
         def build_series(*names: str) -> Dict[str, Any]:
             matched = [r for r in rows if r["metric_name"] in names]
@@ -728,8 +797,9 @@ class Store:
             }
 
         return {
-            "rss_series": build_series("openclaw.memory.rss_bytes"),
+            "rss_series": build_series("process.memory.rss", "openclaw.memory.rss_bytes"),
             "cpu_series": build_series(
+                "process.cpu.utilization",
                 "openclaw.process.cpu_core_ratio",
                 "openclaw.phase.cpu_core_ratio",
                 "openclaw.liveness.cpu_core_ratio",
@@ -1008,8 +1078,13 @@ class Store:
     def create_agent(self, agent: Dict[str, Any]) -> Dict[str, Any]:
         with self._lock, self.connection() as db:
             db.execute("""
-                INSERT INTO eval_agents(agent_id,name,description,endpoint,protocol,auth_type)
-                VALUES(:agent_id,:name,:description,:endpoint,:protocol,:auth_type)
+                INSERT INTO eval_agents(
+                    agent_id,name,description,endpoint,protocol,runtime_type,
+                    execution_mode,executable,working_directory,config_json,auth_type
+                ) VALUES(
+                    :agent_id,:name,:description,:endpoint,:protocol,:runtime_type,
+                    :execution_mode,:executable,:working_directory,:config_json,:auth_type
+                )
             """, agent)
         return agent
 
@@ -1249,7 +1324,12 @@ class Store:
         with self.connection() as db:
             exp = db.execute("""
                 SELECT e.*, a.name AS agent_name, a.endpoint AS agent_endpoint,
-                       a.protocol AS agent_protocol, d.name AS dataset_name
+                       a.protocol AS agent_protocol, a.runtime_type AS agent_runtime_type,
+                       a.execution_mode AS agent_execution_mode,
+                       a.executable AS agent_executable,
+                       a.working_directory AS agent_working_directory,
+                       a.config_json AS agent_config_json,
+                       d.name AS dataset_name
                 FROM eval_experiments e
                 JOIN eval_agents a ON a.agent_id=e.agent_id
                 JOIN eval_datasets d ON d.dataset_id=e.dataset_id

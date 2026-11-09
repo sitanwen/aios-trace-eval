@@ -1,4 +1,4 @@
-"""Execute every case in an evaluation experiment against OpenClaw."""
+"""Execute evaluation cases through platform-specific agent adapters."""
 from __future__ import annotations
 
 import json
@@ -15,11 +15,69 @@ from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import quote, urlparse
 
 from .adapters.registry import get_adapter
+from .process_resource import ProcessTreeSampler
 
 
 ProgressFn = Callable[[str, int, int, str, Optional[str]], None]
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_OPENCLAW_ROOT = PROJECT_ROOT / "work" / "openclaw-8.2"
+
+
+def _execute_cli(
+    base_url: str,
+    command: List[str],
+    *,
+    cwd: Optional[str],
+    environment: Dict[str, str],
+    timeout_s: int,
+    service_name: str,
+    run_id: str,
+    runtime_type: str,
+) -> subprocess.CompletedProcess[str]:
+    """Run one CLI and collect its complete process tree at a fixed cadence."""
+    executable = command[0]
+    explicit_executable = Path(executable).expanduser() if any(
+        separator in executable for separator in ("/", "\\")
+    ) else None
+    if explicit_executable is not None:
+        if not explicit_executable.is_file():
+            raise RuntimeError(f"{runtime_type} 可执行文件不存在：{explicit_executable}")
+        command[0] = str(explicit_executable.resolve())
+    elif shutil.which(executable, path=environment.get("PATH")) is None:
+        raise RuntimeError(
+            f"找不到 {runtime_type} CLI：{executable}。请安装后加入 PATH，或在 Agent 配置中填写可执行文件。"
+        )
+    if cwd and not Path(cwd).expanduser().is_dir():
+        raise RuntimeError(f"Agent 工作目录不存在：{cwd}")
+    process = subprocess.Popen(
+        command, cwd=cwd, env=environment,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, encoding="utf-8", errors="replace",
+    )
+    interval = float(environment.get("AIOS_RESOURCE_SAMPLE_SECONDS", "0.5"))
+    sampler = ProcessTreeSampler(
+        process.pid,
+        service_name=service_name,
+        run_id=run_id,
+        runtime_type=runtime_type,
+        interval_seconds=interval,
+    )
+    sampler.start()
+    try:
+        stdout, stderr = process.communicate(timeout=timeout_s + 30)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        stdout, stderr = process.communicate()
+        raise TimeoutError(f"{runtime_type} 执行超过 {timeout_s + 30} 秒")
+    finally:
+        samples = sampler.stop()
+        if samples:
+            try:
+                _request(base_url, "/api/resource-samples", "POST", {"samples": samples})
+            except Exception:
+                # Resource telemetry must not turn a valid agent answer into a runtime failure.
+                pass
+    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
 
 def _request(base_url: str, path: str, method: str = "GET",
@@ -212,32 +270,75 @@ def _extract_output(envelope: Dict[str, Any]) -> str:
 
 def _set_run_resource_attributes(
     environment: Dict[str, str], run_id: str, case_id: str, experiment_id: str,
+    *, include_run_id: bool = False,
 ) -> None:
     existing = [
         item for item in environment.get("OTEL_RESOURCE_ATTRIBUTES", "").split(",")
         if item and not item.startswith(("aios.run.id=", "aios.case.id=", "aios.experiment.id="))
     ]
-    existing.extend([
-        f"aios.run.id={quote(run_id, safe='')}",
+    attributes = [
         f"aios.case.id={quote(case_id, safe='')}",
         f"aios.experiment.id={quote(experiment_id, safe='')}",
-    ])
+    ]
+    # Local CLI children inherit this reliably. A persistent Gateway does not.
+    if include_run_id:
+        attributes.insert(0, f"aios.run.id={quote(run_id, safe='')}")
+    existing.extend(attributes)
     environment["OTEL_RESOURCE_ATTRIBUTES"] = ",".join(existing)
+
+
+def _select_new_trace(
+    base_url: str,
+    before: set[str],
+    *,
+    service_name: str = "",
+    started_at_ns: int = 0,
+) -> Optional[Dict[str, Any]]:
+    """Select the primary completed Trace without relying on propagated run_id."""
+    candidates = []
+    for item in _request(base_url, "/api/traces?limit=200"):
+        if item["trace_id"] in before:
+            continue
+        if service_name and item.get("service_name") != service_name:
+            continue
+        if started_at_ns and (item.get("started_at_ns") or 0) < started_at_ns - 5_000_000_000:
+            continue
+        if item.get("runtime_status") != "completed":
+            continue
+        if (item.get("total_tokens") or 0) <= 0 or (item.get("duration_ms") or 0) <= 0:
+            continue
+        candidates.append(item)
+    if not candidates:
+        return None
+    # A CLI invocation may export several Trace records. The run Trace normally
+    # contains the most model calls/tokens and has the widest duration.
+    return max(candidates, key=lambda item: (
+        item.get("model_calls") or 0,
+        item.get("total_tokens") or 0,
+        item.get("duration_ms") or 0,
+        item.get("ended_at_ns") or 0,
+    ))
 
 
 def _run_one_case(base_url: str, experiment_id: str, case: Dict[str, Any], *,
                   gateway_port: str, agent: str, timeout_s: int,
                   poll_timeout_s: float, run_batch_id: Optional[str] = None,
                   session_id: Optional[str] = None,
-                  adapter_name: str = "openclaw") -> Dict[str, Any]:
+                  adapter_name: str = "openclaw",
+                  agent_config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    agent_config = agent_config or {}
     run_id = f"run_{uuid.uuid4().hex}"
     _request(base_url, f"/api/experiments/{experiment_id}/attempts", "POST", {
         "case_id": case["case_id"], "run_id": run_id, "run_batch_id": run_batch_id,
     })
     session_id = session_id or f"eval-{experiment_id[-6:]}-{uuid.uuid4().hex[:10]}"
     environment = os.environ.copy()
-    _set_run_resource_attributes(environment, run_id, case["case_id"], experiment_id)
+    _set_run_resource_attributes(
+        environment, run_id, case["case_id"], experiment_id,
+        include_run_id=adapter_name in {"claude_code", "dsh"},
+    )
     before = {item["trace_id"] for item in _request(base_url, "/api/traces?limit=200")}
+    invocation_started_ns = time.time_ns()
     try:
         if adapter_name == "openclaw":
             environment["OPENCLAW_GATEWAY_PORT"] = gateway_port
@@ -247,15 +348,26 @@ def _run_one_case(base_url: str, experiment_id: str, case: Dict[str, Any], *,
             parse_json = True
         else:
             adapter = get_adapter(adapter_name)
+            execution_mode = agent_config.get("execution_mode") or "local_cli"
+            if execution_mode != "local_cli":
+                raise RuntimeError(
+                    f"{adapter_name} 当前配置为 {execution_mode}；平台主动运行实验需要 local_cli"
+                )
+            configured_args = agent_config.get("extra_args")
+            if isinstance(configured_args, str):
+                configured_args = shlex.split(configured_args)
             context = {
                 "session_id": session_id,
                 "timeout": timeout_s,
-                "model": environment.get("AIOS_AGENT_MODEL"),
-                "profile": environment.get("AIOS_AGENT_PROFILE") or "headless",
-                "extra_args": shlex.split(environment.get("AIOS_AGENT_EXTRA_ARGS") or ""),
+                "model": agent_config.get("model") or environment.get("AIOS_AGENT_MODEL"),
+                "profile": agent_config.get("profile") or environment.get("AIOS_AGENT_PROFILE") or "headless",
+                "extra_args": configured_args or
+                              shlex.split(environment.get("AIOS_AGENT_EXTRA_ARGS") or ""),
+                "executable": agent_config.get("executable"),
+                "working_directory": agent_config.get("working_directory"),
             }
-            command = adapter.build_command(case, context)
-            cwd = None
+            plan = adapter.build_execution(case, context)
+            command, cwd = plan.command, plan.cwd
             parse_json = False
             environment.setdefault("OTEL_TRACES_EXPORTER", "otlp")
             environment.setdefault("OTEL_METRICS_EXPORTER", "otlp")
@@ -268,22 +380,28 @@ def _run_one_case(base_url: str, experiment_id: str, case: Dict[str, Any], *,
                 environment.setdefault("CLAUDE_CODE_ENHANCED_TELEMETRY_BETA", "1")
             elif adapter_name == "dsh":
                 environment.setdefault("OTEL_SERVICE_NAME", "dsh-agent")
-                _key = _dsh_api_key(environment)
-                if _key:
-                    environment["DEEPSEEK_API_KEY"] = _key
                 # DSH(Node) 不支持 SOCKS 代理，移除 all_proxy 免得报错
                 environment.pop("all_proxy", None)
                 environment.pop("ALL_PROXY", None)
-        completed = subprocess.run(
-            command, cwd=cwd,
-            env=environment, capture_output=True, text=True, encoding="utf-8",
-            errors="replace", timeout=timeout_s + 30,
-        )
+        if adapter_name == "openclaw":
+            completed = subprocess.run(
+                command, cwd=cwd,
+                env=environment, capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=timeout_s + 30,
+            )
+        else:
+            completed = _execute_cli(
+                base_url, command, cwd=cwd, environment=environment,
+                timeout_s=timeout_s,
+                service_name=environment["OTEL_SERVICE_NAME"],
+                run_id=run_id, runtime_type=adapter_name,
+            )
         if completed.returncode:
             raise RuntimeError(
                 completed.stderr.strip() or completed.stdout[-800:] or f"{adapter_name} 退出码非 0"
             )
-        output = _extract_output(json.loads(completed.stdout)) if parse_json else completed.stdout.strip()
+        output = _extract_output(json.loads(completed.stdout)) if parse_json \
+            else adapter.parse_output(completed.stdout, completed.stderr)
     except Exception as exc:
         _request(base_url, f"/api/attempts/{run_id}", "PATCH", {
             "status": "runtime_error", "error_type": type(exc).__name__,
@@ -297,17 +415,32 @@ def _run_one_case(base_url: str, experiment_id: str, case: Dict[str, Any], *,
 
     trace = None
     deadline = time.time() + poll_timeout_s
+    candidate_id = None
+    candidate_since = None
     while time.time() < deadline:
-        fresh = [item for item in _request(base_url, "/api/traces?limit=200")
-                 if item["trace_id"] not in before]
-        if fresh:
-            current = _request(base_url, f"/api/traces/{fresh[0]['trace_id']}")["trace"]
-            if current["runtime_status"] == "completed" \
-                    and (current.get("total_tokens") or 0) > 0 \
-                    and (current.get("duration_ms") or 0) > 0:
-                trace = current
+        if adapter_name in {"claude_code", "dsh"}:
+            try:
+                exact = _request(base_url, f"/api/traces/by-run-id/{run_id}")["trace"]
+                if exact.get("runtime_status") == "completed" \
+                        and (exact.get("total_tokens") or 0) > 0:
+                    trace = exact
+                    break
+            except RuntimeError as exc:
+                if "HTTP 404" not in str(exc):
+                    raise
+        service_name = "" if adapter_name == "openclaw" else environment.get("OTEL_SERVICE_NAME", "")
+        candidate = _select_new_trace(
+            base_url, before, service_name=service_name,
+            started_at_ns=invocation_started_ns,
+        )
+        if candidate:
+            if candidate["trace_id"] != candidate_id:
+                candidate_id = candidate["trace_id"]
+                candidate_since = time.monotonic()
+            elif candidate_since is not None and time.monotonic() - candidate_since >= 1.0:
+                trace = _request(base_url, f"/api/traces/{candidate_id}")["trace"]
                 break
-        time.sleep(1)
+        time.sleep(0.5)
     if trace is None:
         message = f"{int(poll_timeout_s)} 秒内没有收到对应 OTLP Trace"
         _request(base_url, f"/api/attempts/{run_id}", "PATCH", {
@@ -345,6 +478,7 @@ def run_experiment(*, base_url: str, experiment: Dict[str, Any], cases: List[Dic
                    run_batch_id: Optional[str] = None,
                    shared_session: bool = False,
                    protocol: Optional[str] = None,
+                   agent_config: Optional[Dict[str, Any]] = None,
                    on_progress: Optional[ProgressFn] = None) -> List[Dict[str, Any]]:
     experiment_id, total = experiment["experiment_id"], len(cases)
     adapter_name = _adapter_name_for_protocol(protocol)
@@ -361,6 +495,7 @@ def run_experiment(*, base_url: str, experiment: Dict[str, Any], cases: List[Dic
                 agent=agent, timeout_s=timeout_s, poll_timeout_s=poll_timeout_s,
                 run_batch_id=run_batch_id, session_id=shared_id,
                 adapter_name=adapter_name,
+                agent_config=agent_config,
             ))
         except Exception as exc:  # continue so one case does not hide all other results
             errors.append(f"{name}: {str(exc)[:300]}")

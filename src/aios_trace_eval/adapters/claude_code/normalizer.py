@@ -15,7 +15,7 @@ from typing import Any, Dict, List
 
 from ...canonical import CanonicalRun, CanonicalSpan, CanonicalTokens
 from .. import _spanutil as su
-from ..base import AgentAdapter
+from ..base import AdapterCapabilities, AgentAdapter
 from . import fields as F
 
 
@@ -23,6 +23,11 @@ class ClaudeCodeAdapter(AgentAdapter):
     """Claude Code 适配器。"""
 
     name = "claude_code"
+    capabilities = AdapterCapabilities(
+        execute=True,
+        process_metrics=True,
+        execution_modes=("local_cli", "remote_worker", "observe_only"),
+    )
 
     @classmethod
     def detect(cls, spans: List[Dict[str, Any]], resource: Dict[str, Any]) -> float:
@@ -134,7 +139,7 @@ class ClaudeCodeAdapter(AgentAdapter):
         context: Dict[str, Any],
     ) -> List[str]:
         # 非交互评测：claude -p/--print；内容与遥测由环境变量控制
-        command = ["claude", "--print"]
+        command = [str(context.get("executable") or "claude"), "--print"]
         model = context.get("model")
         if model:
             command.extend(["--model", str(model)])

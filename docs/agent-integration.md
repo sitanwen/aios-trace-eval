@@ -14,9 +14,9 @@
 |---|---|
 | **观测**：agent 推 trace → 前端「运行记录」看到归一化结果 | ✅ 全部平台 |
 | **评测评分**：对入库 trace 跑规则/Judge 评估 | ✅ 全部平台 |
-| **一键跑实验**（平台主动调用 agent 逐个执行 case） | ⏳ 仅 OpenClaw；Claude Code/DSH 的执行适配在下一阶段 |
+| **一键跑实验**（平台主动调用 agent 逐个执行 case） | ✅ OpenClaw Gateway、Claude Code/DSH Local CLI |
 
-所以：**Claude Code / DSH / 通用 GenAI 目前接入后即可“观测 + 评分”，但“一键跑实验”还没做**（该能力当前只对 OpenClaw 开放）。
+Claude Code / DSH 使用 Local CLI 模式时，平台直接启动 CLI，并采集完整进程树的 CPU 与 RSS。Trace 优先精确关联，无法携带关联属性时按同平台新增 Trace 与执行时间窗回退。Remote Worker 尚未开放；其它机器目前使用“仅观测”模式。
 
 ---
 

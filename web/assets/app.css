@@ -542,6 +542,42 @@ main {
   margin: 0;
   line-height: 1.5;
 }
+.agent-title,
+.capability-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.agent-title h3 {
+  margin-bottom: 0;
+}
+.capability-row {
+  margin-top: 10px;
+}
+.capability {
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+  background: #fafafa;
+  font-size: 11px;
+}
+.capability.active {
+  color: #166534;
+  border-color: #bbf7d0;
+  background: #f0fdf4;
+}
+.agent-setup-details {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+}
+.agent-setup-details summary {
+  color: var(--text);
+  cursor: pointer;
+  font-weight: 600;
+}
 .resource-meta {
   display: flex;
   gap: 28px;

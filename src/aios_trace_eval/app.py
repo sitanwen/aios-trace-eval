@@ -46,8 +46,16 @@ class VerdictInput(BaseModel):
 class AgentInput(BaseModel):
     name: str
     description: str = ""
-    endpoint: str
-    protocol: str = "openclaw_gateway"
+    endpoint: str = ""
+    protocol: str = "openclaw"
+    runtime_type: str = "openclaw"
+    execution_mode: str = "gateway"
+    executable: str = ""
+    working_directory: str = ""
+    model: str = ""
+    profile: str = ""
+    extra_args: str = ""
+    config: Optional[dict] = None
     auth_type: str = "none"
 
 
@@ -122,6 +130,10 @@ class AttemptUpdateInput(BaseModel):
     score: Optional[float] = None
     error_type: Optional[str] = None
     error_message: Optional[str] = None
+
+
+class ResourceSamplesInput(BaseModel):
+    samples: list[dict]
 
 
 @app.get("/api/health")
@@ -320,6 +332,18 @@ def _experiment_worker(experiment_id: str, detail: dict, base_url: str,
     timeout_s = int(os.environ.get("AIOS_OPENCLAW_TIMEOUT_SECONDS", "300"))
     poll_timeout_s = float(os.environ.get("AIOS_TRACE_POLL_SECONDS", "90"))
     shared_session = os.environ.get("AIOS_OPENCLAW_SHARED_SESSION", "0") == "1"
+    experiment = detail["experiment"]
+    try:
+        platform_config = json.loads(experiment.get("agent_config_json") or "{}")
+    except (TypeError, ValueError):
+        platform_config = {}
+    agent_config = {
+        **platform_config,
+        "execution_mode": experiment.get("agent_execution_mode"),
+        "executable": experiment.get("agent_executable") or platform_config.get("executable"),
+        "working_directory": experiment.get("agent_working_directory") or
+                             platform_config.get("working_directory"),
+    }
 
     def progress(state: str, completed: int, total: int, current: str,
                  error: str | None) -> None:
@@ -334,7 +358,8 @@ def _experiment_worker(experiment_id: str, detail: dict, base_url: str,
             gateway_port=gateway_port, agent=openclaw_agent, on_progress=progress,
             run_batch_id=run_batch_id, timeout_s=timeout_s, poll_timeout_s=poll_timeout_s,
             shared_session=shared_session,
-            protocol=detail["experiment"].get("agent_protocol"),
+            protocol=experiment.get("agent_runtime_type") or experiment.get("agent_protocol"),
+            agent_config=agent_config,
         )
         store.set_experiment_status(experiment_id, "completed")
         store.update_run(run_batch_id, "completed")
@@ -419,8 +444,18 @@ def update_attempt(run_id: str, body: AttemptUpdateInput) -> dict:
     return {"run_id": run_id, "status": body.status}
 
 
+@app.post("/api/resource-samples", status_code=202)
+def receive_resource_samples(body: ResourceSamplesInput) -> dict:
+    """Receive process samples produced by a local or remote execution worker."""
+    allowed = {"process.memory.rss", "process.cpu.utilization"}
+    samples = [sample for sample in body.samples if sample.get("metric_name") in allowed]
+    store.upsert_metric_samples(samples)
+    return {"accepted": len(samples)}
+
+
 @app.get("/api/traces/by-run-id/{run_id}")
 def trace_by_run_id(run_id: str) -> dict:
+    """Exact local-CLI correlation; Gateway execution uses the freshness fallback."""
     result = store.get_trace_by_run_id(run_id)
     if result is None:
         raise HTTPException(status_code=404, detail="trace not found")
@@ -435,6 +470,14 @@ def agents() -> list:
 @app.post("/api/agents", status_code=201)
 def create_agent(body: AgentInput) -> dict:
     values = body.model_dump()
+    values["runtime_type"] = values["runtime_type"] or values["protocol"]
+    values["protocol"] = values["runtime_type"]  # compatibility for older runners
+    config = values.pop("config") or {}
+    for key in ("model", "profile", "extra_args"):
+        value = values.pop(key)
+        if value:
+            config[key] = value
+    values["config_json"] = json.dumps(config, ensure_ascii=False)
     values["agent_id"] = f"agent_{uuid.uuid4().hex[:12]}"
     return store.create_agent(values)
 

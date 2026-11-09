@@ -15,7 +15,7 @@ from typing import Any, Dict, List
 
 from ...canonical import CanonicalRun, CanonicalTokens
 from .. import _spanutil as su
-from ..base import AgentAdapter
+from ..base import AdapterCapabilities, AgentAdapter
 
 _LLM_OPERATIONS = {"chat", "generate_content", "text_completion", "invoke_agent"}
 
@@ -24,6 +24,11 @@ class OpenClawAdapter(AgentAdapter):
     """OpenClaw（2026.8.2）适配器。"""
 
     name = "openclaw"
+    capabilities = AdapterCapabilities(
+        execute=True,
+        process_metrics=True,
+        execution_modes=("gateway", "observe_only"),
+    )
 
     @classmethod
     def detect(cls, spans: List[Dict[str, Any]], resource: Dict[str, Any]) -> float:
