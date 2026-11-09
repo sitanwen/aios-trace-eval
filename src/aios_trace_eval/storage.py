@@ -191,6 +191,7 @@ CREATE TABLE IF NOT EXISTS experiment_evaluators (
 CREATE TABLE IF NOT EXISTS eval_attempts (
     attempt_id TEXT PRIMARY KEY,
     run_id TEXT NOT NULL UNIQUE,
+    run_batch_id TEXT,
     experiment_id TEXT NOT NULL REFERENCES eval_experiments(experiment_id) ON DELETE CASCADE,
     case_id TEXT NOT NULL REFERENCES eval_cases(case_id),
     trace_id TEXT REFERENCES traces(trace_id) ON DELETE SET NULL,
@@ -210,6 +211,19 @@ ON eval_attempts(experiment_id, started_at_ns);
 
 CREATE INDEX IF NOT EXISTS idx_eval_attempts_case
 ON eval_attempts(case_id, started_at_ns);
+
+CREATE TABLE IF NOT EXISTS eval_runs (
+    run_id TEXT PRIMARY KEY,
+    experiment_id TEXT NOT NULL REFERENCES eval_experiments(experiment_id) ON DELETE CASCADE,
+    total INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'running',
+    error TEXT,
+    started_at_ns INTEGER NOT NULL,
+    ended_at_ns INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_eval_runs_experiment
+ON eval_runs(experiment_id, started_at_ns DESC);
 """
 
 
@@ -322,6 +336,11 @@ class Store:
             for name in ("input_text", "output_text"):
                 if name not in trace_columns:
                     db.execute(f"ALTER TABLE traces ADD COLUMN {name} TEXT")
+            attempt_columns = {row[1] for row in db.execute("PRAGMA table_info(eval_attempts)")}
+            if "run_batch_id" not in attempt_columns:
+                db.execute("ALTER TABLE eval_attempts ADD COLUMN run_batch_id TEXT")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_eval_attempts_run_batch "
+                       "ON eval_attempts(run_batch_id)")
             for evaluator in BUILTIN_EVALUATORS:
                 db.execute("""
                     INSERT OR IGNORE INTO evaluators(
@@ -425,10 +444,12 @@ class Store:
             """, (run_id,)).fetchone()
         return self.get_trace(row["trace_id"]) if row else None
 
-    def create_attempt(self, experiment_id: str, case_id: str, run_id: str) -> Dict[str, Any]:
+    def create_attempt(self, experiment_id: str, case_id: str, run_id: str,
+                       run_batch_id: Optional[str] = None) -> Dict[str, Any]:
         attempt = {
             "attempt_id": f"attempt_{run_id.removeprefix('run_')}",
             "run_id": run_id,
+            "run_batch_id": run_batch_id,
             "experiment_id": experiment_id,
             "case_id": case_id,
             "status": "running",
@@ -444,8 +465,8 @@ class Store:
                 raise KeyError("experiment or case not found")
             db.execute("""
                 INSERT INTO eval_attempts(
-                    attempt_id,run_id,experiment_id,case_id,status,started_at_ns
-                ) VALUES(:attempt_id,:run_id,:experiment_id,:case_id,:status,:started_at_ns)
+                    attempt_id,run_id,run_batch_id,experiment_id,case_id,status,started_at_ns
+                ) VALUES(:attempt_id,:run_id,:run_batch_id,:experiment_id,:case_id,:status,:started_at_ns)
             """, attempt)
         return attempt
 
@@ -473,6 +494,46 @@ class Store:
                 1 if terminal else 0, time.time_ns(), run_id,
             )).rowcount
         return bool(changed)
+
+    def create_run(self, run_id: str, experiment_id: str, total: int) -> None:
+        with self._lock, self.connection() as db:
+            db.execute("""
+                INSERT INTO eval_runs(run_id, experiment_id, total, status, started_at_ns)
+                VALUES(?, ?, ?, 'running', ?)
+            """, (run_id, experiment_id, total, time.time_ns()))
+
+    def update_run(self, run_id: str, status: str, error: Optional[str] = None) -> None:
+        terminal = status in {"completed", "failed"}
+        with self._lock, self.connection() as db:
+            db.execute("""
+                UPDATE eval_runs SET status=?, error=?,
+                    ended_at_ns=CASE WHEN ? THEN COALESCE(ended_at_ns, ?) ELSE ended_at_ns END
+                WHERE run_id=?
+            """, (status, error[:800] if error else None,
+                  1 if terminal else 0, time.time_ns(), run_id))
+
+    def list_runs(self, limit: int = 50) -> List[Dict[str, Any]]:
+        with self.connection() as db:
+            rows = [dict(row) for row in db.execute("""
+                SELECT r.run_id, r.experiment_id, r.total, r.status, r.error,
+                       r.started_at_ns, r.ended_at_ns,
+                       e.name AS experiment_name,
+                       COALESCE(SUM(CASE WHEN a.status='passed' THEN 1 ELSE 0 END), 0) AS passed,
+                       COALESCE(SUM(CASE WHEN a.status IN (
+                           'failed','runtime_error','telemetry_missing','evaluation_error'
+                       ) THEN 1 ELSE 0 END), 0) AS failed
+                FROM eval_runs r
+                JOIN eval_experiments e ON e.experiment_id = r.experiment_id
+                LEFT JOIN eval_attempts a ON a.run_batch_id = r.run_id
+                GROUP BY r.run_id
+                ORDER BY r.started_at_ns DESC
+                LIMIT ?
+            """, (limit,)).fetchall()]
+        for row in rows:
+            terminal = row["passed"] + row["failed"]
+            row["terminal"] = terminal
+            row["pass_rate"] = (row["passed"] / terminal) if terminal else None
+        return rows
 
     def upsert_metric_samples(self, samples: Iterable[Dict[str, Any]]) -> None:
         rows = list(samples)
@@ -608,6 +669,74 @@ class Store:
             ),
             "cpu_total_ms": summary("openclaw.phase.cpu_total_ms"),
             "event_loop_utilization": summary("openclaw.liveness.event_loop_utilization"),
+        }
+
+    def experiment_resource_series(self, experiment_id: str) -> Dict[str, Any]:
+        empty = {
+            "rss_series": {"points": [], "trace_duration_ms": 0, "source": "otel"},
+            "cpu_series": {"points": [], "trace_duration_ms": 0, "source": "otel"},
+            "window_duration_ms": 0,
+        }
+        with self.connection() as db:
+            bounds = db.execute(
+                "SELECT MIN(started_at_ns), MAX(ended_at_ns) "
+                "FROM eval_runs WHERE experiment_id=?",
+                (experiment_id,),
+            ).fetchone()
+            if bounds and bounds[0] is not None and bounds[1] is not None:
+                start_ns, end_ns = bounds
+            else:
+                trace_bounds = db.execute(
+                    "SELECT MIN(started_at_ns), MAX(ended_at_ns) "
+                    "FROM traces WHERE experiment_id=?",
+                    (experiment_id,),
+                ).fetchone()
+                if not trace_bounds or trace_bounds[0] is None or trace_bounds[1] is None:
+                    return empty
+                start_ns, end_ns = trace_bounds
+            service_name = db.execute(
+                "SELECT MIN(service_name) FROM traces WHERE experiment_id=?", (experiment_id,)
+            ).fetchone()[0] or "openclaw"
+            rows = [dict(row) for row in db.execute("""
+                SELECT metric_name, timestamp_ns, value, attributes_json
+                FROM metric_samples
+                WHERE service_name=? AND timestamp_ns BETWEEN ? AND ?
+                  AND metric_name IN (
+                      'openclaw.memory.rss_bytes',
+                      'openclaw.process.cpu_core_ratio',
+                      'openclaw.phase.cpu_core_ratio',
+                      'openclaw.liveness.cpu_core_ratio'
+                  )
+                ORDER BY timestamp_ns
+            """, (service_name, start_ns, end_ns)).fetchall()]
+
+        def build_series(*names: str) -> Dict[str, Any]:
+            matched = [r for r in rows if r["metric_name"] in names]
+            local = [r for r in matched
+                     if '"aios.resource.source":"same_host_process"' in r["attributes_json"]]
+            if local:
+                matched = local
+            unique: Dict[int, Dict[str, Any]] = {r["timestamp_ns"]: r for r in matched}
+            points = [{
+                "offset_ms": round((ts - start_ns) / 1_000_000, 3),
+                "value": r["value"],
+            } for ts, r in sorted(unique.items())]
+            return {
+                "points": points,
+                "trace_duration_ms": round((end_ns - start_ns) / 1_000_000, 3),
+                "source": "same_host_process" if local else "otel",
+            }
+
+        return {
+            "rss_series": build_series("openclaw.memory.rss_bytes"),
+            "cpu_series": build_series(
+                "openclaw.process.cpu_core_ratio",
+                "openclaw.phase.cpu_core_ratio",
+                "openclaw.liveness.cpu_core_ratio",
+            ),
+            "window_start_ns": start_ns,
+            "window_end_ns": end_ns,
+            "window_duration_ms": round((end_ns - start_ns) / 1_000_000, 3),
         }
 
     def overview(self) -> Dict[str, Any]:

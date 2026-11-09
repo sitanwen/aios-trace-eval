@@ -661,6 +661,27 @@ textarea {
 .status.failed:before {
   background: var(--danger);
 }
+.status.running {
+  color: var(--primary);
+}
+.status.running:before {
+  background: var(--primary);
+}
+.run-progress {
+  height: 6px;
+  background: var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+  margin: 4px 0;
+  max-width: 160px;
+}
+.run-progress i {
+  display: block;
+  height: 100%;
+  background: var(--primary);
+  border-radius: 3px;
+  transition: width 0.3s;
+}
 .modal-backdrop,
 .drawer-backdrop {
   position: fixed;

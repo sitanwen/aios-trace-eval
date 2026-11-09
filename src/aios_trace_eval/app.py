@@ -112,6 +112,7 @@ class ExperimentStatusInput(BaseModel):
 class AttemptCreateInput(BaseModel):
     case_id: str
     run_id: str
+    run_batch_id: Optional[str] = None
 
 
 class AttemptUpdateInput(BaseModel):
@@ -251,6 +252,16 @@ def traces(limit: int = Query(100, ge=1, le=500), status: Optional[str] = None, 
     return store.list_traces(limit=limit, status=status, query=q)
 
 
+@app.get("/api/runs")
+def runs(limit: int = Query(50, ge=1, le=200)) -> list:
+    return store.list_runs(limit)
+
+
+@app.get("/api/eval-experiments/{experiment_id}/resource-series")
+def experiment_resource_series(experiment_id: str) -> dict:
+    return store.experiment_resource_series(experiment_id)
+
+
 @app.get("/api/traces/{trace_id}")
 def trace(trace_id: str) -> dict:
     result = store.get_trace(trace_id)
@@ -303,6 +314,13 @@ def update_experiment_status(experiment_id: str, body: ExperimentStatusInput) ->
 
 def _experiment_worker(experiment_id: str, detail: dict, base_url: str,
                        gateway_port: str, openclaw_agent: str) -> None:
+    run_batch_id = f"run_{uuid.uuid4().hex}"
+    total = len(detail["cases"])
+    store.create_run(run_batch_id, experiment_id, total)
+    timeout_s = int(os.environ.get("AIOS_OPENCLAW_TIMEOUT_SECONDS", "300"))
+    poll_timeout_s = float(os.environ.get("AIOS_TRACE_POLL_SECONDS", "90"))
+    shared_session = os.environ.get("AIOS_OPENCLAW_SHARED_SESSION", "0") == "1"
+
     def progress(state: str, completed: int, total: int, current: str,
                  error: str | None) -> None:
         with _RUN_LOCK:
@@ -314,11 +332,15 @@ def _experiment_worker(experiment_id: str, detail: dict, base_url: str,
         experiment_runner.run_experiment(
             base_url=base_url, experiment=detail["experiment"], cases=detail["cases"],
             gateway_port=gateway_port, agent=openclaw_agent, on_progress=progress,
+            run_batch_id=run_batch_id, timeout_s=timeout_s, poll_timeout_s=poll_timeout_s,
+            shared_session=shared_session,
         )
         store.set_experiment_status(experiment_id, "completed")
-        progress("completed", len(detail["cases"]), len(detail["cases"]), "", None)
+        store.update_run(run_batch_id, "completed")
+        progress("completed", total, total, "", None)
     except Exception as exc:
         store.set_experiment_status(experiment_id, "failed")
+        store.update_run(run_batch_id, "failed", str(exc)[:800])
         with _RUN_LOCK:
             previous = _RUN_STATES.get(experiment_id, {})
             _RUN_STATES[experiment_id] = {
@@ -372,7 +394,8 @@ def experiment_run_status(experiment_id: str) -> dict:
 @app.post("/api/experiments/{experiment_id}/attempts", status_code=201)
 def create_attempt(experiment_id: str, body: AttemptCreateInput) -> dict:
     try:
-        return store.create_attempt(experiment_id, body.case_id, body.run_id)
+        return store.create_attempt(experiment_id, body.case_id, body.run_id,
+                                    run_batch_id=body.run_batch_id)
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -720,6 +743,27 @@ def _trajectory_for_judge(spans: list[dict]) -> list[dict]:
     return trajectory
 
 
+def _post_judge_with_retry(request: urllib.request.Request, attempts: int = 3) -> dict:
+    last_exc: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            if 500 <= exc.code < 600 and attempt < attempts - 1:
+                last_exc = exc
+                time.sleep(1.0 * (attempt + 1))
+                continue
+            raise
+        except (urllib.error.URLError, TimeoutError, ConnectionError, json.JSONDecodeError) as exc:
+            last_exc = exc
+            if attempt < attempts - 1:
+                time.sleep(1.0 * (attempt + 1))
+                continue
+            raise
+    raise last_exc
+
+
 def _run_llm_evaluator(
     evaluator: dict, case: dict, actual_output: str, trace_row: dict,
     trajectory: list[dict], default_judge_id: str | None = None,
@@ -751,12 +795,18 @@ def _run_llm_evaluator(
     request = urllib.request.Request(
         judge["base_url"].rstrip("/") + "/chat/completions",
         data=json.dumps({"model": judge["model"], "messages": [{"role": "user", "content": prompt}],
-                         "temperature": 0, "max_tokens": 256, "stream": False}).encode("utf-8"),
+                         "temperature": 0, "max_tokens": 2000, "stream": False}).encode("utf-8"),
         method="POST", headers={"Authorization": f"Bearer {judge['api_key']}", "Content-Type": "application/json"},
     )
-    with urllib.request.urlopen(request, timeout=45) as response:
-        provider_result = json.loads(response.read().decode("utf-8"))
-    reply = provider_result.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+    provider_result = _post_judge_with_retry(request)
+    message = provider_result.get("choices", [{}])[0].get("message", {}) or {}
+    reply = (message.get("content") or "").strip()
+    if not reply or "{" not in reply:
+        reply = (message.get("reasoning_content") or "").strip()
+    if reply.startswith("```"):
+        reply = reply.strip("`")
+        if reply.lower().startswith("json"):
+            reply = reply[4:].strip()
     start, end = reply.find("{"), reply.rfind("}")
     if start < 0 or end < start:
         raise ValueError("Judge 未返回合法 JSON")
