@@ -13,7 +13,7 @@ Code 内置 OTel 仪表，通过环境变量启用，可导出 traces、metrics�
 
 Span 层级（单个 turn）：
     claude_code.interaction
-    ├── claude_code.llm_request
+    ├── claude_code.llm_request (×N)
     ├── claude_code.tool
     │   ├── claude_code.tool.blocked_on_user
     │   └── claude_code.tool.execution
