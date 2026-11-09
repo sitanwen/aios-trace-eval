@@ -454,7 +454,7 @@ document.addEventListener('click',event=>{const target=event.target.closest('[da
 **改动后：**
 
 ```js
-document.addEventListener('click',event=>{const runBtn=event.target.closest('[data-run-experiment]');if(runBtn){event.preventDefault();event.stopPropagation();startExperimentFromCard(runBtn.dataset.run_experiment);return}const target=event.target.closest('[data-goto],[data-empty-action],[data-experiment]');if(target?.dataset.goto)route(target.dataset.goto);...
+document.addEventListener('click',event=>{const runBtn=event.target.closest('[data-run-experiment]');if(runBtn){event.preventDefault();event.stopPropagation();startExperimentFromCard(runBtn.dataset.runExperiment);return}const target=event.target.closest('[data-goto],[data-empty-action],[data-experiment]');if(target?.dataset.goto)route(target.dataset.goto);...
 ```
 
 #### (4) 关闭抽屉 / 打开 Trace 详情时停止轮询
@@ -539,12 +539,12 @@ python scripts/run_dataset_experiment.py \
 
 ```json
 "diagnostics": {
-    "otel": {
-      "enabled": true,
-      "endpoint": "http://127.0.0.1:4318",   // 原值：Collector / Jaeger
-      ...
-    }
+  "otel": {
+    "enabled": true,
+    "endpoint": "http://127.0.0.1:4318",   // 原值：Collector / Jaeger
+    ...
   }
+}
 ```
 
 **改为（直连 AIOS）：**
