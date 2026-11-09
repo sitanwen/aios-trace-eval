@@ -16,7 +16,7 @@ from .generic.normalizer import GenericGenAIAdapter
 
 
 def _build_registry() -> Dict[str, AgentAdapter]:
-    instances: List[Agent] = [
+    instances: List[AgentAdapter] = [
         DSHAdapter(),
         ClaudeCodeAdapter(),
         GenericGenAIAdapter(),
