@@ -46,6 +46,7 @@ class ClaudeCodeAdapter(AgentAdapter):
         model_calls = tool_calls = tool_errors = 0
         runtime_status = "completed"
         model = provider = agent = session_id = ""
+        ttft_ms = None
         canonical_spans: List[CanonicalSpan] = []
 
         for span in spans:
@@ -71,6 +72,8 @@ class ClaudeCodeAdapter(AgentAdapter):
                 tokens.output += su.integer(a, F.ATTR_USAGE_OUTPUT)
                 tokens.cache_read += su.integer(a, F.ATTR_USAGE_CACHE_READ)
                 tokens.cache_write += su.integer(a, F.ATTR_USAGE_CACHE_WRITE)
+                if ttft_ms is None:
+                    ttft_ms = su.number(a, "ttft_ms", "first_content_ms")
 
             # 工具仅以父 span 计数；blocked_on_user/execution 为子 span，不重复统计。
             # 执行结果（success/error）只挂在 execution 子 span 上，因此 tool_errors
@@ -121,6 +124,7 @@ class ClaudeCodeAdapter(AgentAdapter):
             model_calls=model_calls,
             tool_calls=tool_calls,
             tool_errors=tool_errors,
+            ttft_ms=ttft_ms,
             spans=canonical_spans,
         )
 

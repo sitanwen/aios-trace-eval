@@ -78,7 +78,10 @@ class DSHAdapter(AgentAdapter):
                 tokens.input += su.integer(a, F.ATTR_USAGE_INPUT)
                 tokens.output += su.integer(a, F.ATTR_USAGE_OUTPUT)
                 if ttft_ms is None:
-                    ttft_ms = su.number(a, F.ATTR_TTFT)
+                    # gen_ai.response.time_to_first_token 单位为纳秒，换算成毫秒
+                    _ttft_ns = su.number(a, F.ATTR_TTFT)
+                    if _ttft_ns is not None:
+                        ttft_ms = _ttft_ns / 1_000_000
 
             if is_tool:
                 tool_calls += 1

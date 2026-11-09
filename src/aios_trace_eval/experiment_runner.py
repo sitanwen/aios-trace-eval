@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import time
@@ -12,6 +13,8 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import quote, urlparse
+
+from .adapters.registry import get_adapter
 
 
 ProgressFn = Callable[[str, int, int, str, Optional[str]], None]
@@ -39,6 +42,41 @@ def gateway_port_from_endpoint(endpoint: str, default: str) -> str:
         return str(urlparse(endpoint or "").port or default)
     except ValueError:
         return default
+
+
+def _adapter_name_for_protocol(protocol: Optional[str]) -> str:
+    """把 agent 的 protocol 字段映射到适配器名，执行时据此选择 build_command。"""
+    name = (protocol or "").strip().lower()
+    if name in {"", "openclaw", "openclaw_gateway"}:
+        return "openclaw"
+    if name in {"claude_code", "dsh", "generic"}:
+        return name
+    return "openclaw"
+
+
+def _dsh_api_key(environment: Dict[str, str]) -> Optional[str]:
+    """从 DSH 凭据文件读取 DEEPSEEK_API_KEY（已在环境里则直接用）。"""
+    existing = environment.get("DEEPSEEK_API_KEY")
+    if existing:
+        return existing
+    home = Path(environment.get("DSH_HOME") or (Path.home() / ".dsh"))
+    cred = home / ".credentials.yaml"
+    if not cred.is_file():
+        return None
+    text = cred.read_text(encoding="utf-8", errors="replace")
+    try:
+        import yaml  # 可选依赖，没装则走下面的行解析
+        data = yaml.safe_load(text) or {}
+        value = (data.get("refs") or {}).get("DEEPSEEK_API_KEY")
+        if value:
+            return str(value)
+    except Exception:
+        pass
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("DEEPSEEK_API_KEY:"):
+            return stripped.split(":", 1)[1].strip().strip("'\"") or None
+    return None
 
 
 def _existing_path(value: str, label: str, *, directory: bool) -> Path:
@@ -190,20 +228,52 @@ def _set_run_resource_attributes(
 def _run_one_case(base_url: str, experiment_id: str, case: Dict[str, Any], *,
                   gateway_port: str, agent: str, timeout_s: int,
                   poll_timeout_s: float, run_batch_id: Optional[str] = None,
-                  session_id: Optional[str] = None) -> Dict[str, Any]:
+                  session_id: Optional[str] = None,
+                  adapter_name: str = "openclaw") -> Dict[str, Any]:
     run_id = f"run_{uuid.uuid4().hex}"
     _request(base_url, f"/api/experiments/{experiment_id}/attempts", "POST", {
         "case_id": case["case_id"], "run_id": run_id, "run_batch_id": run_batch_id,
     })
     session_id = session_id or f"eval-{experiment_id[-6:]}-{uuid.uuid4().hex[:10]}"
     environment = os.environ.copy()
-    environment["OPENCLAW_GATEWAY_PORT"] = gateway_port
     _set_run_resource_attributes(environment, run_id, case["case_id"], experiment_id)
     before = {item["trace_id"] for item in _request(base_url, "/api/traces?limit=200")}
     try:
-        command, cwd = _openclaw_command(
-            case["input"], session_id, agent, timeout_s, environment
-        )
+        if adapter_name == "openclaw":
+            environment["OPENCLAW_GATEWAY_PORT"] = gateway_port
+            command, cwd = _openclaw_command(
+                case["input"], session_id, agent, timeout_s, environment
+            )
+            parse_json = True
+        else:
+            adapter = get_adapter(adapter_name)
+            context = {
+                "session_id": session_id,
+                "timeout": timeout_s,
+                "model": environment.get("AIOS_AGENT_MODEL"),
+                "profile": environment.get("AIOS_AGENT_PROFILE") or "headless",
+                "extra_args": shlex.split(environment.get("AIOS_AGENT_EXTRA_ARGS") or ""),
+            }
+            command = adapter.build_command(case, context)
+            cwd = None
+            parse_json = False
+            environment.setdefault("OTEL_TRACES_EXPORTER", "otlp")
+            environment.setdefault("OTEL_METRICS_EXPORTER", "otlp")
+            environment.setdefault("OTEL_LOGS_EXPORTER", "otlp")
+            environment.setdefault("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf")
+            environment.setdefault("OTEL_EXPORTER_OTLP_ENDPOINT", base_url.rstrip("/"))
+            if adapter_name == "claude_code":
+                environment.setdefault("OTEL_SERVICE_NAME", "claude-code")
+                environment.setdefault("CLAUDE_CODE_ENABLE_TELEMETRY", "1")
+                environment.setdefault("CLAUDE_CODE_ENHANCED_TELEMETRY_BETA", "1")
+            elif adapter_name == "dsh":
+                environment.setdefault("OTEL_SERVICE_NAME", "dsh-agent")
+                _key = _dsh_api_key(environment)
+                if _key:
+                    environment["DEEPSEEK_API_KEY"] = _key
+                # DSH(Node) 不支持 SOCKS 代理，移除 all_proxy 免得报错
+                environment.pop("all_proxy", None)
+                environment.pop("ALL_PROXY", None)
         completed = subprocess.run(
             command, cwd=cwd,
             env=environment, capture_output=True, text=True, encoding="utf-8",
@@ -211,9 +281,9 @@ def _run_one_case(base_url: str, experiment_id: str, case: Dict[str, Any], *,
         )
         if completed.returncode:
             raise RuntimeError(
-                completed.stderr.strip() or completed.stdout[-800:] or "openclaw 退出码非 0"
+                completed.stderr.strip() or completed.stdout[-800:] or f"{adapter_name} 退出码非 0"
             )
-        output = _extract_output(json.loads(completed.stdout))
+        output = _extract_output(json.loads(completed.stdout)) if parse_json else completed.stdout.strip()
     except Exception as exc:
         _request(base_url, f"/api/attempts/{run_id}", "PATCH", {
             "status": "runtime_error", "error_type": type(exc).__name__,
@@ -274,8 +344,10 @@ def run_experiment(*, base_url: str, experiment: Dict[str, Any], cases: List[Dic
                    poll_timeout_s: float = 30.0,
                    run_batch_id: Optional[str] = None,
                    shared_session: bool = False,
+                   protocol: Optional[str] = None,
                    on_progress: Optional[ProgressFn] = None) -> List[Dict[str, Any]]:
     experiment_id, total = experiment["experiment_id"], len(cases)
+    adapter_name = _adapter_name_for_protocol(protocol)
     shared_id = f"eval-{experiment_id[-6:]}-{uuid.uuid4().hex[:10]}" if shared_session else None
     results: List[Dict[str, Any]] = []
     errors: List[str] = []
@@ -288,6 +360,7 @@ def run_experiment(*, base_url: str, experiment: Dict[str, Any], cases: List[Dic
                 base_url, experiment_id, case, gateway_port=gateway_port,
                 agent=agent, timeout_s=timeout_s, poll_timeout_s=poll_timeout_s,
                 run_batch_id=run_batch_id, session_id=shared_id,
+                adapter_name=adapter_name,
             ))
         except Exception as exc:  # continue so one case does not hide all other results
             errors.append(f"{name}: {str(exc)[:300]}")

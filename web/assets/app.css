@@ -682,6 +682,19 @@ textarea {
   border-radius: 3px;
   transition: width 0.3s;
 }
+.snippet {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  background: var(--primary-soft);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 220px;
+  overflow: auto;
+  margin: 6px 0 8px;
+}
 .modal-backdrop,
 .drawer-backdrop {
   position: fixed;

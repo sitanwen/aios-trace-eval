@@ -19,7 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import experiment_runner
-from .otlp import decode_traces, summarize_trace
+from .otlp import decode_traces, normalize_trace_summary
 from .storage import Store
 from .metrics import catalog
 from .otlp_metrics import decode_metrics
@@ -334,6 +334,7 @@ def _experiment_worker(experiment_id: str, detail: dict, base_url: str,
             gateway_port=gateway_port, agent=openclaw_agent, on_progress=progress,
             run_batch_id=run_batch_id, timeout_s=timeout_s, poll_timeout_s=poll_timeout_s,
             shared_session=shared_session,
+            protocol=detail["experiment"].get("agent_protocol"),
         )
         store.set_experiment_status(experiment_id, "completed")
         store.update_run(run_batch_id, "completed")
@@ -979,7 +980,7 @@ async def receive_traces(request: Request) -> Response:
                 resource["aios.agent.version"] = item["version"]
             complete = store.spans_for_summary(item["trace_id"])
             if complete:
-                store.upsert_trace(summarize_trace(item["trace_id"], complete, resource))
+                store.upsert_trace(normalize_trace_summary(complete, resource, item["trace_id"]))
         store.upsert_metric_samples(process_samples)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"invalid OTLP trace payload: {exc}") from exc

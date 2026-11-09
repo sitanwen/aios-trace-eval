@@ -13,10 +13,12 @@ from .base import AgentAdapter
 from .claude_code.normalizer import ClaudeCodeAdapter
 from .dsh.normalizer import DSHAdapter
 from .generic.normalizer import GenericGenAIAdapter
+from .openclaw.normalizer import OpenClawAdapter
 
 
 def _build_registry() -> Dict[str, AgentAdapter]:
     instances: List[AgentAdapter] = [
+        OpenClawAdapter(),
         DSHAdapter(),
         ClaudeCodeAdapter(),
         GenericGenAIAdapter(),
