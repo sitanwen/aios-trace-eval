@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>AIOS Agent Eval</title>
-  <link rel="stylesheet" href="/assets/app.css?v=20261109-1" />
+  <link rel="stylesheet" href="/assets/app.css?v=20261109-3" />
 </head>
 <body>
   <div class="layout">
@@ -85,8 +85,8 @@
 
       <section id="page-runs" class="page">
         <div class="toolbar">
-          <label class="search"><span>⌕</span><input id="runSearch" placeholder="搜索 Trace、Case、模型或 Agent" /></label>
-          <select id="runStatus"><option value="">全部状态</option><option value="passed">业务通过</option><option value="failed">业务失败</option><option value="ungraded">未评测</option></select>
+          <label class="search"><span>⌕</span><input id="runSearch" placeholder="搜索实验名称" /></label>
+          <select id="runStatus"><option value="">全部状态</option><option value="running">运行中</option><option value="completed">已完成</option><option value="failed">失败</option></select>
         </div>
         <div class="panel"><div id="runList"></div></div>
       </section>
