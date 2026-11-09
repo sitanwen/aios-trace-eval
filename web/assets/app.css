@@ -1406,7 +1406,7 @@ textarea {
 .step-kind {
   background: #f1f5f9;
   border-radius: 4px;
-  color: #475569;
+  color: #4b5563;
   font-size: 10px;
   font-weight: 700;
   padding: 3px 6px;
@@ -1461,7 +1461,7 @@ textarea {
   font-size: 11px;
 }
 .raw-span code {
-  color: #475569;
+  color: #4b5563;
   display: block;
   font-size: 11px;
   margin: 10px 0 6px;
@@ -1525,7 +1525,7 @@ textarea {
   background: #f1f5f9;
   border: 1px solid #dbe2ea;
   border-radius: 7px;
-  color: #475569;
+  color: #4b5563;
   display: flex;
   font-size: 11px;
   font-weight: 700;
