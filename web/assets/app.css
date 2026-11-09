@@ -1307,7 +1307,7 @@ textarea {
   font-size: 10px;
 }
 .verdict-card aside strong {
-  font-size: 22px;
+  font-size: 20px;
   margin-top: 3px;
 }
 .conversation {
@@ -1690,7 +1690,7 @@ textarea {
 .trajectory-kind,
 .raw-span-kind {
   color: #475569;
-  font: 700 9px/1.2 ui-monospace, SFMono-Regular, SFMono-Regular, Consolas, monospace;
+  font: 700 9px/1.2 ui-monospace, SFMono-Regular, Consolas, monospace;
   letter-spacing: .04em;
 }
 .trajectory-kind.user { color: #245da8; }
