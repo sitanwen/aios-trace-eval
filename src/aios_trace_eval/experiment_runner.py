@@ -189,15 +189,17 @@ def _set_run_resource_attributes(
 
 def _run_one_case(base_url: str, experiment_id: str, case: Dict[str, Any], *,
                   gateway_port: str, agent: str, timeout_s: int,
-                  poll_timeout_s: float) -> Dict[str, Any]:
+                  poll_timeout_s: float, run_batch_id: Optional[str] = None,
+                  session_id: Optional[str] = None) -> Dict[str, Any]:
     run_id = f"run_{uuid.uuid4().hex}"
     _request(base_url, f"/api/experiments/{experiment_id}/attempts", "POST", {
-        "case_id": case["case_id"], "run_id": run_id,
+        "case_id": case["case_id"], "run_id": run_id, "run_batch_id": run_batch_id,
     })
-    session_id = f"eval-{experiment_id[-6:]}-{uuid.uuid4().hex[:10]}"
+    session_id = session_id or f"eval-{experiment_id[-6:]}-{uuid.uuid4().hex[:10]}"
     environment = os.environ.copy()
     environment["OPENCLAW_GATEWAY_PORT"] = gateway_port
     _set_run_resource_attributes(environment, run_id, case["case_id"], experiment_id)
+    before = {item["trace_id"] for item in _request(base_url, "/api/traces?limit=200")}
     try:
         command, cwd = _openclaw_command(
             case["input"], session_id, agent, timeout_s, environment
@@ -226,20 +228,18 @@ def _run_one_case(base_url: str, experiment_id: str, case: Dict[str, Any], *,
     trace = None
     deadline = time.time() + poll_timeout_s
     while time.time() < deadline:
-        try:
-            current = _request(base_url, f"/api/traces/by-run-id/{quote(run_id, safe='')}")["trace"]
-        except RuntimeError as exc:
-            if "HTTP 404" not in str(exc):
-                raise
-            current = None
-        if current and current["runtime_status"] == "completed" and (current.get("total_tokens") or 0) > 0:
-            trace = current
-            break
-        if trace:
-            break
+        fresh = [item for item in _request(base_url, "/api/traces?limit=200")
+                 if item["trace_id"] not in before]
+        if fresh:
+            current = _request(base_url, f"/api/traces/{fresh[0]['trace_id']}")["trace"]
+            if current["runtime_status"] == "completed" \
+                    and (current.get("total_tokens") or 0) > 0 \
+                    and (current.get("duration_ms") or 0) > 0:
+                trace = current
+                break
         time.sleep(1)
     if trace is None:
-        message = f"{int(poll_timeout_s)} 秒内没有收到 run_id={run_id} 对应的 OTLP Trace"
+        message = f"{int(poll_timeout_s)} 秒内没有收到对应 OTLP Trace"
         _request(base_url, f"/api/attempts/{run_id}", "PATCH", {
             "status": "telemetry_missing", "error_type": "TelemetryMissing",
             "error_message": message,
@@ -272,8 +272,11 @@ def _run_one_case(base_url: str, experiment_id: str, case: Dict[str, Any], *,
 def run_experiment(*, base_url: str, experiment: Dict[str, Any], cases: List[Dict[str, Any]],
                    gateway_port: str, agent: str = "main", timeout_s: int = 120,
                    poll_timeout_s: float = 30.0,
+                   run_batch_id: Optional[str] = None,
+                   shared_session: bool = False,
                    on_progress: Optional[ProgressFn] = None) -> List[Dict[str, Any]]:
     experiment_id, total = experiment["experiment_id"], len(cases)
+    shared_id = f"eval-{experiment_id[-6:]}-{uuid.uuid4().hex[:10]}" if shared_session else None
     results: List[Dict[str, Any]] = []
     errors: List[str] = []
     for index, case in enumerate(cases):
@@ -284,6 +287,7 @@ def run_experiment(*, base_url: str, experiment: Dict[str, Any], cases: List[Dic
             results.append(_run_one_case(
                 base_url, experiment_id, case, gateway_port=gateway_port,
                 agent=agent, timeout_s=timeout_s, poll_timeout_s=poll_timeout_s,
+                run_batch_id=run_batch_id, session_id=shared_id,
             ))
         except Exception as exc:  # continue so one case does not hide all other results
             errors.append(f"{name}: {str(exc)[:300]}")
