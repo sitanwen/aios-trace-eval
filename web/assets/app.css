@@ -1307,7 +1307,7 @@ textarea {
   font-size: 10px;
 }
 .verdict-card aside strong {
-  font-size: 20px;
+  font-size: 22px;
   margin-top: 3px;
 }
 .conversation {
@@ -1689,7 +1689,7 @@ textarea {
 .trajectory-time { text-align: right; }
 .trajectory-kind,
 .raw-span-kind {
-  color: #475569;
+  color: #4b5563;
   font: 700 9px/1.2 ui-monospace, SFMono-Regular, Consolas, monospace;
   letter-spacing: .04em;
 }
