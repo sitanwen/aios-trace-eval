@@ -11,7 +11,7 @@ import urllib.request
 import uuid
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 
 ProgressFn = Callable[[str, int, int, str, Optional[str]], None]
@@ -172,46 +172,101 @@ def _extract_output(envelope: Dict[str, Any]) -> str:
     return json.dumps(envelope, ensure_ascii=False)[:2000]
 
 
+def _set_run_resource_attributes(
+    environment: Dict[str, str], run_id: str, case_id: str, experiment_id: str,
+) -> None:
+    existing = [
+        item for item in environment.get("OTEL_RESOURCE_ATTRIBUTES", "").split(",")
+        if item and not item.startswith(("aios.run.id=", "aios.case.id=", "aios.experiment.id="))
+    ]
+    existing.extend([
+        f"aios.run.id={quote(run_id, safe='')}",
+        f"aios.case.id={quote(case_id, safe='')}",
+        f"aios.experiment.id={quote(experiment_id, safe='')}",
+    ])
+    environment["OTEL_RESOURCE_ATTRIBUTES"] = ",".join(existing)
+
+
 def _run_one_case(base_url: str, experiment_id: str, case: Dict[str, Any], *,
                   gateway_port: str, agent: str, timeout_s: int,
                   poll_timeout_s: float) -> Dict[str, Any]:
-    before = {item["trace_id"] for item in _request(base_url, "/api/traces?limit=500")}
+    run_id = f"run_{uuid.uuid4().hex}"
+    _request(base_url, f"/api/experiments/{experiment_id}/attempts", "POST", {
+        "case_id": case["case_id"], "run_id": run_id,
+    })
     session_id = f"eval-{experiment_id[-6:]}-{uuid.uuid4().hex[:10]}"
     environment = os.environ.copy()
     environment["OPENCLAW_GATEWAY_PORT"] = gateway_port
-    command, cwd = _openclaw_command(
-        case["input"], session_id, agent, timeout_s, environment
-    )
-    completed = subprocess.run(
-        command, cwd=cwd,
-        env=environment, capture_output=True, text=True, encoding="utf-8",
-        errors="replace", timeout=timeout_s + 30,
-    )
-    if completed.returncode:
-        raise RuntimeError(completed.stderr.strip() or completed.stdout[-800:] or "openclaw 退出码非 0")
-    output = _extract_output(json.loads(completed.stdout))
+    _set_run_resource_attributes(environment, run_id, case["case_id"], experiment_id)
+    try:
+        command, cwd = _openclaw_command(
+            case["input"], session_id, agent, timeout_s, environment
+        )
+        completed = subprocess.run(
+            command, cwd=cwd,
+            env=environment, capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=timeout_s + 30,
+        )
+        if completed.returncode:
+            raise RuntimeError(
+                completed.stderr.strip() or completed.stdout[-800:] or "openclaw 退出码非 0"
+            )
+        output = _extract_output(json.loads(completed.stdout))
+    except Exception as exc:
+        _request(base_url, f"/api/attempts/{run_id}", "PATCH", {
+            "status": "runtime_error", "error_type": type(exc).__name__,
+            "error_message": str(exc),
+        })
+        raise
+
+    _request(base_url, f"/api/attempts/{run_id}", "PATCH", {
+        "status": "awaiting_trace", "actual_output": output,
+    })
 
     trace = None
     deadline = time.time() + poll_timeout_s
     while time.time() < deadline:
-        fresh = [item for item in _request(base_url, "/api/traces?limit=500")
-                 if item["trace_id"] not in before]
-        for candidate in fresh:
-            current = _request(base_url, f"/api/traces/{candidate['trace_id']}")["trace"]
-            if current["runtime_status"] == "completed" and (current.get("total_tokens") or 0) > 0:
-                trace = current
-                break
+        try:
+            current = _request(base_url, f"/api/traces/by-run-id/{quote(run_id, safe='')}")["trace"]
+        except RuntimeError as exc:
+            if "HTTP 404" not in str(exc):
+                raise
+            current = None
+        if current and current["runtime_status"] == "completed" and (current.get("total_tokens") or 0) > 0:
+            trace = current
+            break
         if trace:
             break
         time.sleep(1)
     if trace is None:
-        raise RuntimeError(f"{int(poll_timeout_s)} 秒内没有收到对应 OTLP Trace")
+        message = f"{int(poll_timeout_s)} 秒内没有收到 run_id={run_id} 对应的 OTLP Trace"
+        _request(base_url, f"/api/attempts/{run_id}", "PATCH", {
+            "status": "telemetry_missing", "error_type": "TelemetryMissing",
+            "error_message": message,
+        })
+        raise RuntimeError(message)
 
-    result = _request(base_url, f"/api/traces/{trace['trace_id']}/evaluate", "POST", {
-        "case_id": case["case_id"], "actual_output": output, "experiment_id": experiment_id,
+    _request(base_url, f"/api/attempts/{run_id}", "PATCH", {
+        "status": "evaluating", "trace_id": trace["trace_id"], "actual_output": output,
+    })
+    try:
+        result = _request(base_url, f"/api/traces/{trace['trace_id']}/evaluate", "POST", {
+            "case_id": case["case_id"], "actual_output": output, "experiment_id": experiment_id,
+        })
+    except Exception as exc:
+        _request(base_url, f"/api/attempts/{run_id}", "PATCH", {
+            "status": "evaluation_error", "trace_id": trace["trace_id"],
+            "actual_output": output, "error_type": type(exc).__name__,
+            "error_message": str(exc),
+        })
+        raise
+    _request(base_url, f"/api/attempts/{run_id}", "PATCH", {
+        "status": "passed" if result.get("passed") else "failed",
+        "trace_id": trace["trace_id"], "actual_output": output,
+        "score": result.get("score"),
     })
     return {"case": case.get("name"), "trace_id": trace["trace_id"],
-            "passed": result.get("passed"), "score": result.get("score")}
+            "run_id": run_id, "passed": result.get("passed"), "score": result.get("score")}
 
 
 def run_experiment(*, base_url: str, experiment: Dict[str, Any], cases: List[Dict[str, Any]],

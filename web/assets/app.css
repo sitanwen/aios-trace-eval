@@ -851,6 +851,17 @@ textarea {
   color: var(--muted);
   line-height: 1.6;
 }
+.evaluation-evidence {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.evaluation-evidence > span {
+  color: var(--muted);
+  font-size: 11px;
+}
 .detail-grid div {
   border: 1px solid var(--border);
   border-radius: 6px;

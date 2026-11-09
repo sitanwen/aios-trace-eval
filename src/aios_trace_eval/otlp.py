@@ -142,7 +142,10 @@ def summarize_trace(trace_id: str, spans: List[Dict[str, Any]], resource: Dict[s
     runtime_status = "completed"
     cost_usd = None
     ttft_ms = None
-    run_id = case_id = experiment_id = version = None
+    run_id = resource.get("aios.run.id")
+    case_id = resource.get("aios.case.id")
+    experiment_id = resource.get("aios.experiment.id")
+    version = resource.get("aios.agent.version")
 
     for span in spans:
         attrs = span["_attributes"]

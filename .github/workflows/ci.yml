@@ -23,3 +23,4 @@ jobs:
       - run: node --check web/assets/app.js
       - run: python scripts/selftest.py
       - run: python scripts/selftest_platform.py
+      - run: python scripts/selftest_trust.py

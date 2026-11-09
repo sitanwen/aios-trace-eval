@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional
@@ -50,6 +51,7 @@ CREATE TABLE IF NOT EXISTS traces (
 CREATE INDEX IF NOT EXISTS idx_traces_started ON traces(started_at_ns DESC);
 CREATE INDEX IF NOT EXISTS idx_traces_experiment ON traces(experiment_id, version);
 CREATE INDEX IF NOT EXISTS idx_traces_case ON traces(case_id);
+CREATE INDEX IF NOT EXISTS idx_traces_run_id ON traces(run_id);
 
 CREATE TABLE IF NOT EXISTS spans (
     span_id TEXT PRIMARY KEY,
@@ -185,6 +187,29 @@ CREATE TABLE IF NOT EXISTS experiment_evaluators (
     field_mapping_json TEXT NOT NULL DEFAULT '{}',
     PRIMARY KEY (experiment_id, evaluator_id)
 );
+
+CREATE TABLE IF NOT EXISTS eval_attempts (
+    attempt_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL UNIQUE,
+    experiment_id TEXT NOT NULL REFERENCES eval_experiments(experiment_id) ON DELETE CASCADE,
+    case_id TEXT NOT NULL REFERENCES eval_cases(case_id),
+    trace_id TEXT REFERENCES traces(trace_id) ON DELETE SET NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    error_type TEXT,
+    error_message TEXT,
+    actual_output TEXT,
+    score REAL,
+    started_at_ns INTEGER NOT NULL,
+    ended_at_ns INTEGER,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_eval_attempts_experiment
+ON eval_attempts(experiment_id, started_at_ns);
+
+CREATE INDEX IF NOT EXISTS idx_eval_attempts_case
+ON eval_attempts(case_id, started_at_ns);
 """
 
 
@@ -307,6 +332,30 @@ class Store:
                         :pass_threshold,:config_json,:is_builtin
                     )
                 """, evaluator)
+            # Preserve experiment history created before Attempt records existed.
+            # The insert is idempotent and never rewrites a real Attempt.
+            db.execute("""
+                INSERT OR IGNORE INTO eval_attempts(
+                    attempt_id,run_id,experiment_id,case_id,trace_id,status,
+                    score,started_at_ns,ended_at_ns
+                )
+                SELECT 'attempt_legacy_' || t.trace_id,
+                       CASE WHEN t.run_id IS NULL OR t.run_id='' THEN t.trace_id ELSE t.run_id END,
+                       t.experiment_id,t.case_id,t.trace_id,
+                       CASE
+                           WHEN t.runtime_status='error' THEN 'runtime_error'
+                           WHEN t.business_status='passed' THEN 'passed'
+                           WHEN t.business_status='failed' THEN 'failed'
+                           ELSE 'ungraded'
+                       END,
+                       t.score,t.started_at_ns,t.ended_at_ns
+                FROM traces t
+                JOIN eval_experiments e ON e.experiment_id=t.experiment_id
+                JOIN eval_cases c ON c.case_id=t.case_id AND c.dataset_id=e.dataset_id
+                WHERE NOT EXISTS(
+                    SELECT 1 FROM eval_attempts a WHERE a.trace_id=t.trace_id
+                )
+            """)
 
     @contextmanager
     def connection(self) -> Iterator[sqlite3.Connection]:
@@ -321,7 +370,21 @@ class Store:
     def upsert_trace(self, trace: Dict[str, Any]) -> None:
         columns = list(trace)
         values = [trace[column] for column in columns]
-        update = ", ".join(f"{column}=excluded.{column}" for column in columns if column != "trace_id")
+        preserve_when_missing = {"case_id", "experiment_id", "version", "agent", "provider", "model"}
+        updates = []
+        for column in columns:
+            if column == "trace_id":
+                continue
+            if column == "run_id":
+                updates.append(
+                    "run_id=CASE WHEN excluded.run_id=excluded.trace_id "
+                    "THEN COALESCE(traces.run_id, excluded.run_id) ELSE excluded.run_id END"
+                )
+            elif column in preserve_when_missing:
+                updates.append(f"{column}=COALESCE(excluded.{column}, traces.{column})")
+            else:
+                updates.append(f"{column}=excluded.{column}")
+        update = ", ".join(updates)
         placeholders = ", ".join("?" for _ in columns)
         sql = (
             f"INSERT INTO traces ({', '.join(columns)}) VALUES ({placeholders}) "
@@ -343,6 +406,73 @@ class Store:
         )
         with self._lock, self.connection() as db:
             db.executemany(sql, [[row[column] for column in columns] for row in rows])
+
+    def spans_for_summary(self, trace_id: str) -> List[Dict[str, Any]]:
+        with self.connection() as db:
+            rows = [dict(row) for row in db.execute(
+                "SELECT * FROM spans WHERE trace_id=? ORDER BY started_at_ns", (trace_id,)
+            ).fetchall()]
+        for row in rows:
+            row["_attributes"] = json.loads(row["attributes_json"] or "{}")
+        return rows
+
+    def get_trace_by_run_id(self, run_id: str) -> Optional[Dict[str, Any]]:
+        with self.connection() as db:
+            row = db.execute("""
+                SELECT trace_id FROM traces WHERE run_id=?
+                ORDER BY (total_tokens > 0) DESC, total_tokens DESC, ended_at_ns DESC
+                LIMIT 1
+            """, (run_id,)).fetchone()
+        return self.get_trace(row["trace_id"]) if row else None
+
+    def create_attempt(self, experiment_id: str, case_id: str, run_id: str) -> Dict[str, Any]:
+        attempt = {
+            "attempt_id": f"attempt_{run_id.removeprefix('run_')}",
+            "run_id": run_id,
+            "experiment_id": experiment_id,
+            "case_id": case_id,
+            "status": "running",
+            "started_at_ns": time.time_ns(),
+        }
+        with self._lock, self.connection() as db:
+            valid = db.execute("""
+                SELECT 1 FROM eval_experiments e
+                JOIN eval_cases c ON c.dataset_id=e.dataset_id
+                WHERE e.experiment_id=? AND c.case_id=?
+            """, (experiment_id, case_id)).fetchone()
+            if not valid:
+                raise KeyError("experiment or case not found")
+            db.execute("""
+                INSERT INTO eval_attempts(
+                    attempt_id,run_id,experiment_id,case_id,status,started_at_ns
+                ) VALUES(:attempt_id,:run_id,:experiment_id,:case_id,:status,:started_at_ns)
+            """, attempt)
+        return attempt
+
+    def update_attempt(
+        self, run_id: str, status: str, *, trace_id: Optional[str] = None,
+        actual_output: Optional[str] = None, score: Optional[float] = None,
+        error_type: Optional[str] = None, error_message: Optional[str] = None,
+    ) -> bool:
+        terminal = status in {
+            "passed", "failed", "runtime_error", "telemetry_missing", "evaluation_error"
+        }
+        with self._lock, self.connection() as db:
+            changed = db.execute("""
+                UPDATE eval_attempts SET status=?,
+                    trace_id=COALESCE(?, trace_id),
+                    actual_output=COALESCE(?, actual_output),
+                    score=COALESCE(?, score),
+                    error_type=?, error_message=?,
+                    ended_at_ns=CASE WHEN ? THEN COALESCE(ended_at_ns, ?) ELSE ended_at_ns END,
+                    updated_at=CURRENT_TIMESTAMP
+                WHERE run_id=?
+            """, (
+                status, trace_id, actual_output, score, error_type,
+                error_message[:2000] if error_message else None,
+                1 if terminal else 0, time.time_ns(), run_id,
+            )).rowcount
+        return bool(changed)
 
     def upsert_metric_samples(self, samples: Iterable[Dict[str, Any]]) -> None:
         rows = list(samples)
@@ -591,6 +721,8 @@ class Store:
                 ) latest ON latest.latest_id=r.id
                 ORDER BY r.id
             """, (trace_id,)).fetchall()]
+            for item in evals:
+                item["evidence"] = json.loads(item.pop("evidence_json") or "{}")
             trace = dict(trace_row)
             runtime_metrics = self._runtime_metrics(db, trace)
         return {"trace": trace, "spans": spans, "evaluations": evals, "runtime_metrics": runtime_metrics}
@@ -913,7 +1045,9 @@ class Store:
             return [dict(row) for row in db.execute("""
                 SELECT e.*, a.name AS agent_name, d.name AS dataset_name,
                        j.name AS judge_model_name, j.model AS judge_model,
-                       COUNT(DISTINCT t.trace_id) AS run_count,
+                       CASE WHEN COUNT(DISTINCT at.attempt_id) > 0
+                            THEN COUNT(DISTINCT at.attempt_id)
+                            ELSE COUNT(DISTINCT t.trace_id) END AS run_count,
                        COUNT(DISTINCT ee.evaluator_id) AS evaluator_count,
                        GROUP_CONCAT(DISTINCT ev.name) AS evaluator_names
                 FROM eval_experiments e
@@ -923,6 +1057,7 @@ class Store:
                 LEFT JOIN experiment_evaluators ee ON ee.experiment_id=e.experiment_id
                 LEFT JOIN evaluators ev ON ev.evaluator_id=ee.evaluator_id
                 LEFT JOIN traces t ON t.experiment_id=e.experiment_id
+                LEFT JOIN eval_attempts at ON at.experiment_id=e.experiment_id
                 GROUP BY e.experiment_id ORDER BY e.created_at DESC
             """).fetchall()]
 
@@ -1001,24 +1136,78 @@ class Store:
             cases = [dict(row) for row in db.execute(
                 "SELECT * FROM eval_cases WHERE dataset_id=? ORDER BY created_at", (exp["dataset_id"],)
             ).fetchall()]
-            runs = [dict(row) for row in db.execute("""
+            trace_runs = [dict(row) for row in db.execute("""
                 SELECT t.*, c.name AS case_name FROM traces t
                 LEFT JOIN eval_cases c ON c.case_id=t.case_id
                 WHERE t.experiment_id=? ORDER BY t.started_at_ns
             """, (experiment_id,)).fetchall()]
+            attempts = [dict(row) for row in db.execute("""
+                SELECT a.*, c.name AS case_name
+                FROM eval_attempts a
+                JOIN eval_cases c ON c.case_id=a.case_id
+                WHERE a.experiment_id=? ORDER BY a.started_at_ns
+            """, (experiment_id,)).fetchall()]
+            traces_by_id = {run["trace_id"]: run for run in trace_runs}
         for evaluator in evaluators:
             evaluator["config"] = json.loads(evaluator.pop("config_json") or "{}")
         for case in cases:
             case["assertions"] = json.loads(case.pop("assertions_json") or "[]")
-        passed = sum(1 for run in runs if run["business_status"] == "passed")
+        if attempts:
+            runs = []
+            represented_traces = set()
+            for attempt in attempts:
+                trace = traces_by_id.get(attempt.get("trace_id")) or {}
+                if attempt.get("trace_id"):
+                    represented_traces.add(attempt["trace_id"])
+                runs.append({
+                    **trace,
+                    **attempt,
+                    "started_at_ns": trace.get("started_at_ns") or attempt["started_at_ns"],
+                    "business_status": (
+                        trace.get("business_status")
+                        if trace else attempt["status"]
+                    ),
+                })
+            runs.extend(run for run in trace_runs if run["trace_id"] not in represented_traces)
+            total = len(attempts)
+            passed = sum(1 for attempt in attempts if attempt["status"] == "passed")
+            evaluated = sum(1 for attempt in attempts if attempt["status"] in {"passed", "failed"})
+            covered_cases = len({attempt["case_id"] for attempt in attempts})
+            trace_values = [
+                traces_by_id[attempt["trace_id"]]
+                for attempt in attempts if attempt.get("trace_id") in traces_by_id
+            ]
+        else:
+            runs = trace_runs
+            total = len(runs)
+            passed = sum(1 for run in runs if run["business_status"] == "passed")
+            evaluated = sum(1 for run in runs if run["business_status"] in {"passed", "failed"})
+            covered_cases = len({run["case_id"] for run in runs if run.get("case_id")})
+            trace_values = runs
+        case_count = len(cases)
         return {
-            "experiment": dict(exp), "evaluators": evaluators, "cases": cases, "runs": runs,
+            "experiment": dict(exp), "evaluators": evaluators, "cases": cases,
+            "runs": runs, "attempts": attempts,
             "summary": {
-                "total": len(runs), "passed": passed,
-                "pass_rate": round(passed / len(runs), 4) if runs else None,
-                "avg_score": round(sum((run["score"] or 0) for run in runs) / len(runs), 4) if runs else None,
-                "total_tokens": sum(run["total_tokens"] or 0 for run in runs),
-                "avg_duration_ms": round(sum(run["duration_ms"] or 0 for run in runs) / len(runs), 1) if runs else None,
+                "total": total, "passed": passed,
+                "pass_rate": round(passed / total, 4) if total else None,
+                "evaluated": evaluated,
+                "evaluated_pass_rate": round(passed / evaluated, 4) if evaluated else None,
+                "covered_cases": covered_cases,
+                "coverage_rate": round(covered_cases / case_count, 4) if case_count else None,
+                "errors": sum(
+                    1 for attempt in attempts
+                    if attempt["status"] in {"runtime_error", "telemetry_missing", "evaluation_error"}
+                ),
+                "avg_score": round(
+                    sum((attempt.get("score") or 0) for attempt in attempts) / total, 4
+                ) if attempts and total else (
+                    round(sum((run["score"] or 0) for run in runs) / total, 4) if total else None
+                ),
+                "total_tokens": sum(run.get("total_tokens") or 0 for run in trace_values),
+                "avg_duration_ms": round(
+                    sum(run.get("duration_ms") or 0 for run in trace_values) / len(trace_values), 1
+                ) if trace_values else None,
             },
         }
 
