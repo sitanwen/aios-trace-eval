@@ -661,6 +661,27 @@ textarea {
 .status.failed:before {
   background: var(--danger);
 }
+.status.running {
+  color: var(--primary);
+}
+.status.running:before {
+  background: var(--primary);
+}
+.run-progress {
+  height: 6px;
+  background: var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+  margin: 4px 0;
+  max-width: 160px;
+}
+.run-progress i {
+  display: block;
+  height: 100%;
+  background: var(--primary);
+  border-radius: 3px;
+  transition: width 0.3s;
+}
 .modal-backdrop,
 .drawer-backdrop {
   position: fixed;
@@ -1210,7 +1231,7 @@ textarea {
   border: 1px solid var(--border-strong);
   border-radius: 4px;
   padding: 3px 7px;
-  color: #4b5563;
+  color: #475569;
   background: #fafafa;
   font-size: 11px;
   white-space: nowrap;
@@ -1406,7 +1427,7 @@ textarea {
 .step-kind {
   background: #f1f5f9;
   border-radius: 4px;
-  color: #4b5563;
+  color: #475569;
   font-size: 10px;
   font-weight: 700;
   padding: 3px 6px;
@@ -1461,7 +1482,7 @@ textarea {
   font-size: 11px;
 }
 .raw-span code {
-  color: #4b5563;
+  color: #475569;
   display: block;
   font-size: 11px;
   margin: 10px 0 6px;
@@ -1525,7 +1546,7 @@ textarea {
   background: #f1f5f9;
   border: 1px solid #dbe2ea;
   border-radius: 7px;
-  color: #4b5563;
+  color: #475569;
   display: flex;
   font-size: 11px;
   font-weight: 700;
@@ -1668,8 +1689,8 @@ textarea {
 .trajectory-time { text-align: right; }
 .trajectory-kind,
 .raw-span-kind {
-  color: #4b5563;
-  font: 700 9px/1.2 ui-monospace, SFMono-Regular, Consolas, monospace;
+  color: #475569;
+  font: 700 9px/1.2 ui-monospace, SFMono-Regular, SFMono-Regular, Consolas, monospace;
   letter-spacing: .04em;
 }
 .trajectory-kind.user { color: #245da8; }
