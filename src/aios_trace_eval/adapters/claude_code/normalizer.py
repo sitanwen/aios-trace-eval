@@ -1,8 +1,10 @@
 """Claude Code 平台归一化适配器。
 
-依据 claude_code.* 私有 span 名识别交互、模型请求与工具调用，token 从标准
-gen_ai.usage 字段读取。Anthropic 口径下 cache_read/cache_write 独立于
-input，total = input + output + cache_read + cache_write，与 DSH 不同。
+依据 claude_code.* 私有 span 名识别交互、模型请求与工具调用，token 从
+llm_request span 的 input_tokens / output_tokens / cache_read_tokens /
+cache_creation_tokens 属性读取（Claude Code 不设置 gen_ai.usage.*）。Anthropic
+口径下 cache_read/cache_write 独立于 input，
+total = input + output + cache_read + cache_write，与 DSH 不同。
 
 工具仅以 claude_code.tool 计数，blocked_on_user/execution 为其子 span，
 不重复统计。
@@ -25,7 +27,7 @@ class ClaudeCodeAdapter(AgentAdapter):
     @classmethod
     def detect(cls, spans: List[Dict[str, Any]], resource: Dict[str, Any]) -> float:
         for span in spans:
-            name = span.get("name", "")
+            name = str(span.get("name") or "")
             if name.startswith("claude_code."):
                 return 0.9
             if su.attrs(span).get(F.ATTR_SESSION_ID) and resource.get(
@@ -70,24 +72,22 @@ class ClaudeCodeAdapter(AgentAdapter):
                 tokens.cache_read += su.integer(a, F.ATTR_USAGE_CACHE_READ)
                 tokens.cache_write += su.integer(a, F.ATTR_USAGE_CACHE_WRITE)
 
-            # 仅父 tool span 计数，忽略 blocked_on_user/execution 子 span
+            # 工具仅以父 span 计数；blocked_on_user/execution 为子 span，不重复统计。
+            # 执行结果（success/error）只挂在 execution 子 span 上，因此 tool_errors
+            # 只从 execution 子 span 累加，避免父、子双算。
             if name == F.SPAN_TOOL:
                 tool_calls += 1
-                if span.get("status") == "error":
-                    tool_errors += 1
             elif name == F.SPAN_TOOL_EXECUTION and span.get("status") == "error":
                 tool_errors += 1
 
-            if name == F.SPAN_INTERACTION and span.get("status") == "error":
-                runtime_status = "error"
             if span.get("status") == "error":
                 runtime_status = "error"
 
-            model = model or su.text(a, "gen_ai.request.model")
+            model = model or su.text(a, "model", "gen_ai.request.model")
             provider = provider or su.text(
                 a, "gen_ai.provider.name", "gen_ai.system"
             )
-            agent = agent or su.text(a, "gen_ai.agent.name")
+            agent = agent or su.text(a, F.ATTR_AGENT_ID)
             session_id = session_id or su.text(a, F.ATTR_SESSION_ID)
 
         # Anthropic 口径：缓存项独立于 input，total 为各分类之和
@@ -95,8 +95,14 @@ class ClaudeCodeAdapter(AgentAdapter):
             tokens.input + tokens.output + tokens.cache_read + tokens.cache_write
         )
 
-        started = min((s.started_at_ns for s in canonical_spans), default=0)
-        ended = max((s.ended_at_ns for s in canonical_spans), default=0)
+        started = min(
+            (s.started_at_ns for s in canonical_spans if s.started_at_ns > 0),
+            default=0,
+        )
+        ended = max(
+            (s.ended_at_ns for s in canonical_spans if s.ended_at_ns > 0),
+            default=0,
+        )
         return CanonicalRun(
             trace_id=trace_id,
             service_name=str(resource.get("service.name", F.DEFAULT_SERVICE_NAME)),

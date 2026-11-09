@@ -72,10 +72,11 @@ class DSHAdapter(AgentAdapter):
             # 仅 LLM span 计入 token；invoke_agent 聚合 span 显式跳过
             if is_llm and name != F.SPAN_AGENT:
                 model_calls += 1
+                # DSH 口径：cache_read/cache_write 是 input_tokens 的子集，不是
+                # 并列项，不能单独累加到 tokens.cache_*，否则缓存会被重复计入。
+                # input_tokens 已包含缓存，此处只累加 input/output。
                 tokens.input += su.integer(a, F.ATTR_USAGE_INPUT)
                 tokens.output += su.integer(a, F.ATTR_USAGE_OUTPUT)
-                tokens.cache_read += su.integer(a, F.ATTR_USAGE_CACHE_READ)
-                tokens.cache_write += su.integer(a, F.ATTR_USAGE_CACHE_WRITE)
                 if ttft_ms is None:
                     ttft_ms = su.number(a, F.ATTR_TTFT)
 
@@ -98,12 +99,20 @@ class DSHAdapter(AgentAdapter):
         # DSH 口径：cache_read 已含在 input，total = input + output
         tokens.total = tokens.input + tokens.output
 
-        started = min((s.started_at_ns for s in canonical_spans), default=0)
-        ended = max((s.ended_at_ns for s in canonical_spans), default=0)
+        # 过滤时间戳为 0 的 span（OTLP 中 start/end_time_unix_nano 可能为 0），
+        # 否则 min(started) 会被 0 拉低、max(ended) 相对可靠但会污染 duration。
+        started = min(
+            (s.started_at_ns for s in canonical_spans if s.started_at_ns > 0),
+            default=0,
+        )
+        ended = max(
+            (s.ended_at_ns for s in canonical_spans if s.ended_at_ns > 0),
+            default=0,
+        )
         return CanonicalRun(
             trace_id=trace_id,
-            service_name=str(resource.get("service.name", "")),
-            run_id=str(resource.get("aios.run.id", "")) or turn_id or trace_id,
+            service_name=str(resource.get("service.name") or ""),
+            run_id=str(resource.get("aios.run.id") or "") or turn_id or trace_id,
             case_id=resource.get("aios.case.id"),
             experiment_id=resource.get("aios.experiment.id"),
             version=resource.get("aios.agent.version"),
@@ -112,7 +121,7 @@ class DSHAdapter(AgentAdapter):
             model=model or None,
             started_at_ns=started,
             ended_at_ns=ended,
-            duration_ms=round((ended - started) / 1_000_000, 3) if ended else 0.0,
+            duration_ms=round((ended - started) / 1_000_000, 3) if started and ended else 0.0,
             runtime_status=runtime_status,
             tokens=tokens,
             model_calls=model_calls,

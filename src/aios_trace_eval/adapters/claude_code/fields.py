@@ -34,12 +34,15 @@ DEFAULT_SERVICE_NAME = "claude-code"
 
 # 身份属性
 ATTR_SESSION_ID = "session.id"
+ATTR_AGENT_ID = "agent_id"
 
-# 标准 token 用量属性（Claude Code 遵循 OTel GenAI 语义）
-ATTR_USAGE_INPUT = "gen_ai.usage.input_tokens"
-ATTR_USAGE_OUTPUT = "gen_ai.usage.output_tokens"
-ATTR_USAGE_CACHE_READ = "gen_ai.usage.cache_read.input_tokens"
-ATTR_USAGE_CACHE_WRITE = "gen_ai.usage.cache_creation.input_tokens"
+# token 用量属性。Claude Code 不设置 gen_ai.usage.*：input/output/cache 直接以
+# input_tokens / output_tokens / cache_read_tokens / cache_creation_tokens
+# 放在 claude_code.llm_request span 上，其中 input_tokens 已排除缓存 token。
+ATTR_USAGE_INPUT = "input_tokens"
+ATTR_USAGE_OUTPUT = "output_tokens"
+ATTR_USAGE_CACHE_READ = "cache_read_tokens"
+ATTR_USAGE_CACHE_WRITE = "cache_creation_tokens"
 
 # 遥测环境变量开关
 ENV_ENABLE_TELEMETRY = "CLAUDE_CODE_ENABLE_TELEMETRY"
