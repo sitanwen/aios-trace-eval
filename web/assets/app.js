@@ -12,6 +12,7 @@ const firstAttr=(attrs,keys)=>keys.map(key=>attrs?.[key]).find(value=>value!==un
 function formatPayload(value){if(value==null)return'';if(typeof value!=='string')return JSON.stringify(value,null,2);try{return JSON.stringify(JSON.parse(value),null,2)}catch{return value}}
 function processChart(series,{unit,axisLabel,scale,decimals=1,tone='rss'}){
   const width=900,height=250,padLeft=72,padRight=24,padTop=20,padBottom=52,duration=Math.max(Number(series.trace_duration_ms)||0,1);
+  // Keep the chart auditable: connect observed samples only; never synthesize task boundaries.
   const points=(series?.points||[]).filter(point=>point.offset_ms>=0&&point.offset_ms<=duration);
   if(!points.length)return`<div class="process-chart-empty">任务执行期间没有${unit==='MiB'?' RSS':' CPU'}采样点。</div>`;
   const minOffset=0,maxOffset=duration;
