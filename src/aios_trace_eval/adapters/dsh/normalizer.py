@@ -27,7 +27,7 @@ class DSHAdapter(AgentAdapter):
             a = su.attrs(span)
             if a.get(F.ATTR_TURN_ID) or a.get(F.ATTR_AGENT_ID) == "deepseek-harness":
                 return 0.9
-            name = span.get("name","")
+            name = span.get("name", "")
             if name.startswith(F.SPAN_STEP_PREFIX) or name == F.SPAN_ENTRY:
                 return 0.8
         return 0.0
@@ -47,18 +47,18 @@ class DSHAdapter(AgentAdapter):
 
         for span in spans:
             a = su.attrs(span)
-            name = str(span.get("name",""))
-            operation = str(a.get("gen_ai.operation.name",""))
+            name = str(span.get("name", ""))
+            operation = str(a.get("gen_ai.operation.name", ""))
             canonical_spans.append(
                 CanonicalSpan(
-                    span_id=str(span.get("span_id","")),
-                    parent_span_id=str(span.get("parent_span_id","")),
+                    span_id=str(span.get("span_id", "")),
+                    parent_span_id=str(span.get("parent_span_id", "")),
                     name=name,
-                    kind=str(span.get("kind","")),
-                    started_at_ns=int(span.get("started_at_ns",0) or 0),
-                    ended_at_ns=int(span.get("ended_at_ns",0) or 0),
-                    duration_ms=float(span.get("duration_ms",0.0) or 0.0),
-                    status=str(span.get("status","unset")),
+                    kind=str(span.get("kind", "")),
+                    started_at_ns=int(span.get("started_at_ns", 0) or 0),
+                    ended_at_ns=int(span.get("ended_at_ns", 0) or 0),
+                    duration_ms=float(span.get("duration_ms", 0.0) or 0.0),
+                    status=str(span.get("status", "unset")),
                     attributes=a,
                 )
             )
@@ -102,8 +102,8 @@ class DSHAdapter(AgentAdapter):
         ended = max((s.ended_at_ns for s in canonical_spans), default=0)
         return CanonicalRun(
             trace_id=trace_id,
-            service_name=str(resource.get("service.name","")),
-            run_id=str(resource.get("aios.run.id","")) or turn_id or trace_id,
+            service_name=str(resource.get("service.name", "")),
+            run_id=str(resource.get("aios.run.id", "")) or turn_id or trace_id,
             case_id=resource.get("aios.case.id"),
             experiment_id=resource.get("aios.experiment.id"),
             version=resource.get("aios.agent.version"),
@@ -128,7 +128,7 @@ class DSHAdapter(AgentAdapter):
         context: Dict[str, Any],
     ) -> List[str]:
         # headless profile：新建持久化会话，打印最终回答后退出，适用于批量评测
-        profile = str(context.get("profile","headless"))
+        profile = str(context.get("profile", "headless"))
         command = ["dsh", "--profile", profile]
         extra = context.get("extra_args")
         if extra:

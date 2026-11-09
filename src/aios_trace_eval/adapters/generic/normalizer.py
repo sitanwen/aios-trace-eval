@@ -2,7 +2,13 @@
 
 仅依据 OpenTelemetry GenAI 标准语义字段（gen_ai.*）归一化，不读取任何
 厂商私有字段。任何严格遵循 GenAI 语义约定、通过 OTLP 上报的平台都可由
-本适配器直接接入，无需新增代码。
+本适配器直接接入，无需新增代码，例如：
+
+- 通过 opentelemetry-instrumentation-openai 自动埋点、base_url 指向
+  DeepSeek 的应用；
+- DeepSeek Harness（DSH）dsh-plugin 等输出标准 GenAI span 的运行时。
+
+厂商私有 span 名与属性由各自专用适配器处理，并在标准字段缺失时兜底。
 """
 from __future__ import annotations
 
@@ -11,6 +17,7 @@ from typing import Any, Dict, List
 from ...canonical import CanonicalRun, CanonicalSpan, CanonicalTokens
 from ..base import AgentAdapter
 
+# GenAI 操作类型
 _LLM_OPERATIONS = {"chat", "generate_content", "text_completion", "invoke_agent"}
 _TOOL_OPERATION = "execute_tool"
 
@@ -20,6 +27,7 @@ def _attrs(span: Dict[str, Any]) -> Dict[str, Any]:
     if isinstance(parsed, dict):
         return parsed
     import json
+
     raw = span.get("attributes_json", "{}")
     try:
         return json.loads(raw) if isinstance(raw, str) else dict(raw)
@@ -79,17 +87,17 @@ class GenericGenAIAdapter(AgentAdapter):
 
         for span in spans:
             attrs = _attrs(span)
-            operation = str(attrs.get("gen_ai.operation.name",""))
+            operation = str(attrs.get("gen_ai.operation.name", ""))
             canonical_spans.append(
                 CanonicalSpan(
-                    span_id=str(span.get("span_id","")),
-                    parent_span_id=str(span.get("parent_span_id","")),
-                    name=name=str(span.get("name","")),
-                    kind=str(span.get("kind","")),
-                    started_at_ns=int(span.get("started_at_ns",0) or 0),
-                    ended_at_ns=int(span.get("ended_at_ns",0) or 0),
-                    duration_ms=float(span.get("duration_ms",0.0) or 0.0),
-                    status=str(span.get("status","unset")),
+                    span_id=str(span.get("span_id", "")),
+                    parent_span_id=str(span.get("parent_span_id", "")),
+                    name=str(span.get("name", "")),
+                    kind=str(span.get("kind", "")),
+                    started_at_ns=int(span.get("started_at_ns", 0) or 0),
+                    ended_at_ns=int(span.get("ended_at_ns", 0) or 0),
+                    duration_ms=float(span.get("duration_ms", 0.0) or 0.0),
+                    status=str(span.get("status", "unset")),
                     attributes=attrs,
                 )
             )
@@ -134,8 +142,8 @@ class GenericGenAIAdapter(AgentAdapter):
         ended = max((s.ended_at_ns for s in canonical_spans), default=0)
         run = CanonicalRun(
             trace_id=trace_id,
-            service_name=str(resource.get("service.name","")),
-            run_id=str(resource.get("aios.run.id","")) or trace_id,
+            service_name=str(resource.get("service.name", "")),
+            run_id=str(resource.get("aios.run.id", "")) or trace_id,
             case_id=resource.get("aios.case.id"),
             experiment_id=resource.get("aios.experiment.id"),
             version=resource.get("aios.agent.version"),

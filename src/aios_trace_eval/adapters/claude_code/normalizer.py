@@ -51,14 +51,14 @@ class ClaudeCodeAdapter(AgentAdapter):
             name = str(span.get("name", ""))
             canonical_spans.append(
                 CanonicalSpan(
-                    span_id=str(span.get("span_id","")),
-                    parent_span_id=str(span.get("parent_span_id","")),
+                    span_id=str(span.get("span_id", "")),
+                    parent_span_id=str(span.get("parent_span_id", "")),
                     name=name,
-                    kind=str(span.get("kind","")),
-                    started_at_ns=int(span.get("started_at_ns",0) or 0),
-                    ended_at_ns=int(span.get("ended_at_ns",0) or 0),
-                    duration_ms=float(span.get("duration_ms",0.0) or 0.0),
-                    status=str(span.get("status","unset")),
+                    kind=str(span.get("kind", "")),
+                    started_at_ns=int(span.get("started_at_ns", 0) or 0),
+                    ended_at_ns=int(span.get("ended_at_ns", 0) or 0),
+                    duration_ms=float(span.get("duration_ms", 0.0) or 0.0),
+                    status=str(span.get("status", "unset")),
                     attributes=a,
                 )
             )
@@ -100,7 +100,7 @@ class ClaudeCodeAdapter(AgentAdapter):
         return CanonicalRun(
             trace_id=trace_id,
             service_name=str(resource.get("service.name", F.DEFAULT_SERVICE_NAME)),
-            run_id=str(resource.get("aios.run.id","")) or session_id or trace_id,
+            run_id=str(resource.get("aios.run.id", "")) or session_id or trace_id,
             case_id=resource.get("aios.case.id"),
             experiment_id=resource.get("aios.experiment.id"),
             version=resource.get("aios.agent.version"),

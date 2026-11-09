@@ -6,7 +6,7 @@
 设计目标：
 - 与现有 storage 期望的 trace 汇总字段保持一致，降低迁移成本；
 - 保留完整 span 列表与原始属性，供轨迹评估与证据回溯；
-- 厂商私有属性仅在对应 adapter 内读取。
+- 厂商私有属性仅在对应 adapter 内读取，不进入核心流程。
 """
 from __future__ import annotations
 
@@ -28,8 +28,7 @@ class CanonicalTokens:
     def add(self, other: "CanonicalTokens") -> None:
         self.input += other.input
         self.output += other.output
-        self.cache_read += other
-        self.cache_write += other
+        self.cache_read += other.cache_read
         self.cache_write += other.cache_write
         self.reasoning += other.reasoning
         self.total += other.total
@@ -37,7 +36,7 @@ class CanonicalTokens:
 
 @dataclass
 class CanonicalSpan:
-    """归一化单 span，属性以原始 dict 保留。"""
+    """归一化后的单个 span，属性以原始 dict 保留。"""
 
     span_id: str
     parent_span_id: str = ""
@@ -66,7 +65,6 @@ class CanonicalRun:
     started_at_ns: int = 0
     ended_at_ns: int = 0
     duration_ms: float = 0.0
-    runtime_status: "runtime_status"
     runtime_status: str = "completed"
     tokens: CanonicalTokens = field(default_factory=CanonicalTokens)
     cost_usd: Optional[float] = None
@@ -79,7 +77,7 @@ class CanonicalRun:
     spans: List[CanonicalSpan] = field(default_factory=list)
 
     def to_trace_summary(self) -> Dict[str, Any]:
-        """映射到 storage 期望的扁平 dict。"""
+        """映射到 storage.upsert_trace 期望的扁平 dict 字段。"""
         return {
             "trace_id": self.trace_id,
             "run_id": self.run_id or self.trace_id,
@@ -90,7 +88,7 @@ class CanonicalRun:
             "agent": self.agent,
             "provider": self.provider,
             "model": self.model,
-            "started_at_ns": self.started_at_ns,
+            "started_at_ns": self.started_at,
             "ended_at_ns": self.ended_at_ns,
             "duration_ms": self.duration_ms,
             "runtime_status": self.runtime_status,
