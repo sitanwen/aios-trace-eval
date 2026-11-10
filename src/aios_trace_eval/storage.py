@@ -10,6 +10,10 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional
 
 
+# 历史记录没有 run_batch_id 时，两次执行之间超过这个间隔就视为不同的运行批次。
+RUN_BATCH_GAP_NS = 30 * 60 * 1_000_000_000
+
+
 SCHEMA = """
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
@@ -561,10 +565,16 @@ class Store:
                 ORDER BY r.started_at_ns DESC
                 LIMIT ?
             """, (limit,)).fetchall()]
+        # 运行序号与实验抽屉里的批次序号保持一致（含历史伪批次）
+        sequences: Dict[tuple, int] = {}
+        for experiment_id in {row["experiment_id"] for row in rows}:
+            for batch in self.experiment_run_batches(experiment_id):
+                sequences[(experiment_id, batch["run_id"])] = batch["sequence"]
         for row in rows:
             terminal = row["passed"] + row["failed"]
             row["terminal"] = terminal
             row["pass_rate"] = (row["passed"] / terminal) if terminal else None
+            row["run_sequence"] = sequences.get((row["experiment_id"], row["run_id"]))
         return rows
 
     def upsert_metric_samples(self, samples: Iterable[Dict[str, Any]]) -> None:
@@ -593,13 +603,14 @@ class Store:
             (trace["trace_id"],),
         ).fetchone()
         run_id = attempt["run_id"] if attempt else ""
-        rows = [dict(row) for row in db.execute("""
+        start_ns = trace["started_at_ns"] - padding_ns
+        end_ns = trace["ended_at_ns"] + padding_ns
+        select_columns = """
             SELECT run_id, metric_name, timestamp_ns, value, count, sum_value,
                    min_value, max_value, unit, attributes_json
             FROM metric_samples
-            WHERE timestamp_ns BETWEEN ? AND ?
-              AND (run_id=? OR (run_id='' AND service_name=?))
-              AND metric_name IN (
+        """
+        metric_filter = """AND metric_name IN (
                 'process.memory.rss',
                 'process.cpu.utilization',
                 'openclaw.memory.rss_bytes',
@@ -609,16 +620,21 @@ class Store:
                 'openclaw.process.cpu_core_ratio',
                 'openclaw.phase.cpu_total_ms'
               )
-            ORDER BY timestamp_ns
-        """, (
-            trace["started_at_ns"] - padding_ns,
-            trace["ended_at_ns"] + padding_ns,
-            run_id,
-            trace["service_name"],
-        )).fetchall()]
-        exact_run_rows = [row for row in rows if run_id and row["run_id"] == run_id]
-        if exact_run_rows:
+            ORDER BY timestamp_ns"""
+        # 不用 OR 合并两个来源：run_id='' 会命中上百万行，导致索引扫描退化成秒级查询。
+        rows: List[Dict[str, Any]] = []
+        exact_run_rows: List[Dict[str, Any]] = []
+        if run_id:
+            exact_run_rows = [dict(row) for row in db.execute(
+                select_columns + " WHERE run_id=? AND timestamp_ns BETWEEN ? AND ? " + metric_filter,
+                (run_id, start_ns, end_ns),
+            ).fetchall()]
             rows = exact_run_rows
+        if not rows:
+            rows = [dict(row) for row in db.execute(
+                select_columns + " WHERE run_id='' AND service_name=? AND timestamp_ns BETWEEN ? AND ? " + metric_filter,
+                (trace["service_name"], start_ns, end_ns),
+            ).fetchall()]
 
         def source_of(row: Dict[str, Any]) -> str:
             try:
@@ -722,21 +738,106 @@ class Store:
             "cpu_total_ms": summary("openclaw.phase.cpu_total_ms"),
         }
 
-    def experiment_resource_series(self, experiment_id: str) -> Dict[str, Any]:
+    def experiment_run_batches(self, experiment_id: str) -> List[Dict[str, Any]]:
+        """把一次执行聚成一个批次：同一 run_batch_id 的 Case 属于同一次运行。
+
+        历史记录没有 run_batch_id，按开始时间间隔归并成伪批次，避免不同次运行混在一起。
+        """
+        with self.connection() as db:
+            official = [dict(row) for row in db.execute("""
+                SELECT run_id, total, status, error, started_at_ns, ended_at_ns
+                FROM eval_runs WHERE experiment_id=? ORDER BY started_at_ns
+            """, (experiment_id,)).fetchall()]
+            attempts = [dict(row) for row in db.execute("""
+                SELECT a.run_id, a.run_batch_id, a.case_id, a.status, a.error_type,
+                       a.error_message, a.score, a.started_at_ns, a.ended_at_ns,
+                       a.trace_id, c.name AS case_name
+                FROM eval_attempts a JOIN eval_cases c ON c.case_id=a.case_id
+                WHERE a.experiment_id=? ORDER BY a.started_at_ns
+            """, (experiment_id,)).fetchall()]
+        grouped: Dict[str, List[Dict[str, Any]]] = {}
+        legacy: List[Dict[str, Any]] = []
+        for attempt in attempts:
+            batch_id = attempt.get("run_batch_id")
+            if batch_id:
+                grouped.setdefault(batch_id, []).append(attempt)
+            else:
+                legacy.append(attempt)
+        batches: List[Dict[str, Any]] = []
+        for run in official:
+            batches.append(self._batch_payload(run["run_id"], grouped.pop(run["run_id"], []), run))
+        for batch_id, items in grouped.items():
+            batches.append(self._batch_payload(batch_id, items))
+        cluster: List[Dict[str, Any]] = []
+        seen_cases: set = set()
+        last_ns: Optional[int] = None
+        for attempt in legacy:
+            # 同一批里每个 Case 只跑一次；Case 重复出现或间隔过久，说明进入了新的一次运行
+            if cluster and (
+                attempt["started_at_ns"] - (last_ns or attempt["started_at_ns"]) > RUN_BATCH_GAP_NS
+                or attempt["case_id"] in seen_cases
+            ):
+                batches.append(self._batch_payload(f"legacy_{cluster[0]['started_at_ns']}", cluster))
+                cluster, seen_cases = [], set()
+            cluster.append(attempt)
+            seen_cases.add(attempt["case_id"])
+            last_ns = attempt["started_at_ns"]
+        if cluster:
+            batches.append(self._batch_payload(f"legacy_{cluster[0]['started_at_ns']}", cluster))
+        batches.sort(key=lambda item: item["started_at_ns"] or 0)
+        for index, batch in enumerate(batches, start=1):
+            batch["sequence"] = index
+        return batches
+
+    @staticmethod
+    def _batch_payload(batch_id: str, attempts: List[Dict[str, Any]],
+                       run: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        run = run or {}
+        terminal_status = {"passed", "failed", "runtime_error", "telemetry_missing", "evaluation_error"}
+        started = min((item["started_at_ns"] for item in attempts), default=None) or run.get("started_at_ns")
+        ended = run.get("ended_at_ns")
+        if ended is None:
+            ended = max((item.get("ended_at_ns") or item["started_at_ns"] for item in attempts), default=None)
+        passed = sum(1 for item in attempts if item["status"] == "passed")
+        failed = sum(1 for item in attempts if item["status"] in terminal_status - {"passed"})
+        finished = sum(1 for item in attempts if item["status"] in terminal_status)
+        status = run.get("status") or ("running" if finished < len(attempts) else ("failed" if failed else "completed"))
+        return {
+            "run_id": batch_id,
+            "started_at_ns": started,
+            "ended_at_ns": ended,
+            "status": status,
+            "error": run.get("error"),
+            "total": run.get("total") or len(attempts),
+            "passed": passed,
+            "failed": failed,
+            "finished": finished,
+            "attempts": attempts,
+        }
+
+    def experiment_resource_series(self, experiment_id: str,
+                                   run_batch_id: Optional[str] = None) -> Dict[str, Any]:
+        """按「一次运行」的窗口产出资源曲线，默认取最近一次运行。"""
         empty = {
             "rss_series": {"points": [], "trace_duration_ms": 0, "source": "otel"},
             "cpu_series": {"points": [], "trace_duration_ms": 0, "source": "otel"},
             "window_duration_ms": 0,
         }
+        batches = self.experiment_run_batches(experiment_id)
+        selected = None
+        if run_batch_id:
+            selected = next((item for item in batches if item["run_id"] == run_batch_id), None)
+        if selected is None and batches:
+            selected = batches[-1]
+        run_ids: List[str] = []
+        start_ns: Optional[int] = None
+        end_ns: Optional[int] = None
+        if selected is not None:
+            start_ns = selected.get("started_at_ns")
+            end_ns = selected.get("ended_at_ns") or start_ns
+            run_ids = [item["run_id"] for item in selected["attempts"]]
         with self.connection() as db:
-            bounds = db.execute(
-                "SELECT MIN(started_at_ns), MAX(ended_at_ns) "
-                "FROM eval_runs WHERE experiment_id=?",
-                (experiment_id,),
-            ).fetchone()
-            if bounds and bounds[0] is not None and bounds[1] is not None:
-                start_ns, end_ns = bounds
-            else:
+            if start_ns is None:
                 trace_bounds = db.execute(
                     "SELECT MIN(started_at_ns), MAX(ended_at_ns) "
                     "FROM traces WHERE experiment_id=?",
@@ -745,9 +846,9 @@ class Store:
                 if not trace_bounds or trace_bounds[0] is None or trace_bounds[1] is None:
                     return empty
                 start_ns, end_ns = trace_bounds
-            run_ids = [row[0] for row in db.execute(
-                "SELECT run_id FROM eval_attempts WHERE experiment_id=?", (experiment_id,)
-            ).fetchall()]
+            if end_ns is None:
+                end_ns = start_ns
+            rows: List[Dict[str, Any]] = []
             if run_ids:
                 placeholders = ",".join("?" for _ in run_ids)
                 rows = [dict(row) for row in db.execute(f"""
@@ -761,7 +862,8 @@ class Store:
                       )
                     ORDER BY timestamp_ns
                 """, run_ids).fetchall()]
-            else:
+            if not rows:
+                # Gateway 模式的 OTel 指标不带 run_id，退回按服务名 + 本次运行窗口匹配
                 service_name = db.execute(
                     "SELECT MIN(service_name) FROM traces WHERE experiment_id=?", (experiment_id,)
                 ).fetchone()[0] or "openclaw"
@@ -807,6 +909,7 @@ class Store:
             "window_start_ns": start_ns,
             "window_end_ns": end_ns,
             "window_duration_ms": round((end_ns - start_ns) / 1_000_000, 3),
+            "run_id": selected["run_id"] if selected else None,
         }
 
     def overview(self) -> Dict[str, Any]:
@@ -882,8 +985,8 @@ class Store:
         with self.connection() as db:
             return [dict(row) for row in db.execute(
                 f"""
-                SELECT t.*, c.name AS case_name, c.dataset_id, d.name AS dataset_name,
-                       e.name AS experiment_name
+                SELECT t.*, c.name AS case_name, c.dataset_id, c.input AS case_input,
+                       d.name AS dataset_name, e.name AS experiment_name
                 FROM traces t
                 LEFT JOIN eval_cases c ON c.case_id=t.case_id
                 LEFT JOIN eval_datasets d ON d.dataset_id=c.dataset_id
@@ -896,8 +999,8 @@ class Store:
     def get_trace(self, trace_id: str) -> Optional[Dict[str, Any]]:
         with self.connection() as db:
             trace_row = db.execute("""
-                SELECT t.*, c.name AS case_name, c.dataset_id, d.name AS dataset_name,
-                       e.name AS experiment_name
+                SELECT t.*, c.name AS case_name, c.dataset_id, c.input AS case_input,
+                       d.name AS dataset_name, e.name AS experiment_name
                 FROM traces t
                 LEFT JOIN eval_cases c ON c.case_id=t.case_id
                 LEFT JOIN eval_datasets d ON d.dataset_id=c.dataset_id
@@ -1088,6 +1191,59 @@ class Store:
             """, agent)
         return agent
 
+    def get_agent(self, agent_id: str) -> Optional[Dict[str, Any]]:
+        with self.connection() as db:
+            row = db.execute(
+                "SELECT * FROM eval_agents WHERE agent_id=?", (agent_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def update_agent(
+        self, agent_id: str, agent: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        with self._lock, self.connection() as db:
+            current = db.execute(
+                "SELECT name FROM eval_agents WHERE agent_id=?", (agent_id,)
+            ).fetchone()
+            if not current:
+                return None
+            # 历史 Trace 用 Agent 名称关联，改名时同步过去，避免运行记录断开
+            if current["name"] != agent["name"]:
+                db.execute(
+                    "UPDATE traces SET agent=? WHERE agent=?",
+                    (agent["name"], current["name"]),
+                )
+            db.execute("""
+                UPDATE eval_agents SET
+                    name=:name,
+                    description=:description,
+                    endpoint=:endpoint,
+                    protocol=:protocol,
+                    runtime_type=:runtime_type,
+                    execution_mode=:execution_mode,
+                    executable=:executable,
+                    working_directory=:working_directory,
+                    config_json=:config_json,
+                    auth_type=:auth_type
+                WHERE agent_id=:agent_id
+            """, {**agent, "agent_id": agent_id})
+        return self.get_agent(agent_id)
+
+    def delete_agent(self, agent_id: str) -> bool:
+        with self._lock, self.connection() as db:
+            exists = db.execute(
+                "SELECT 1 FROM eval_agents WHERE agent_id=?", (agent_id,)
+            ).fetchone()
+            if not exists:
+                return False
+            used = db.execute(
+                "SELECT COUNT(*) FROM eval_experiments WHERE agent_id=?", (agent_id,)
+            ).fetchone()[0]
+            if used:
+                raise ValueError(f"该 Agent 正被 {used} 个评测实验使用，请先删除这些实验")
+            db.execute("DELETE FROM eval_agents WHERE agent_id=?", (agent_id,))
+        return True
+
     def list_judge_models(self) -> List[Dict[str, Any]]:
         with self.connection() as db:
             return [dict(row) for row in db.execute("""
@@ -1132,6 +1288,75 @@ class Store:
                     last_latency_ms=?, last_error=?
                 WHERE judge_model_id=?
             """, (status, latency_ms, error, judge_model_id))
+
+    def update_judge_model(
+        self, judge_model_id: str, judge: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        with self._lock, self.connection() as db:
+            exists = db.execute(
+                "SELECT 1 FROM judge_models WHERE judge_model_id=?", (judge_model_id,)
+            ).fetchone()
+            if not exists:
+                return None
+            # 编辑时留空 api_key 表示保持原 Key
+            api_key = (judge.get("api_key") or "").strip()
+            if api_key:
+                db.execute("""
+                    UPDATE judge_models SET
+                        name=?, provider=?, base_url=?, model=?, api_key=?,
+                        status='configured', last_tested_at=NULL,
+                        last_latency_ms=NULL, last_error=NULL
+                    WHERE judge_model_id=?
+                """, (
+                    judge["name"], judge["provider"], judge["base_url"],
+                    judge["model"], api_key, judge_model_id,
+                ))
+            else:
+                db.execute("""
+                    UPDATE judge_models SET
+                        name=?, provider=?, base_url=?, model=?,
+                        status='configured', last_tested_at=NULL,
+                        last_latency_ms=NULL, last_error=NULL
+                    WHERE judge_model_id=?
+                """, (
+                    judge["name"], judge["provider"], judge["base_url"],
+                    judge["model"], judge_model_id,
+                ))
+            row = db.execute("""
+                SELECT judge_model_id, name, provider, base_url, model, status,
+                       CASE WHEN api_key <> '' THEN 1 ELSE 0 END AS has_api_key,
+                       last_tested_at, last_latency_ms, last_error, created_at
+                FROM judge_models WHERE judge_model_id=?
+            """, (judge_model_id,)).fetchone()
+        return dict(row) if row else None
+
+    def delete_judge_model(self, judge_model_id: str) -> bool:
+        with self._lock, self.connection() as db:
+            exists = db.execute(
+                "SELECT 1 FROM judge_models WHERE judge_model_id=?", (judge_model_id,)
+            ).fetchone()
+            if not exists:
+                return False
+            used_by_evaluators = db.execute(
+                "SELECT COUNT(*) FROM evaluators WHERE judge_model_id=?",
+                (judge_model_id,),
+            ).fetchone()[0]
+            used_by_experiments = db.execute(
+                "SELECT COUNT(*) FROM eval_experiments WHERE judge_model_id=?",
+                (judge_model_id,),
+            ).fetchone()[0]
+            if used_by_evaluators:
+                raise ValueError(
+                    f"该评测模型正被 {used_by_evaluators} 个评测指标使用，请先调整这些指标"
+                )
+            if used_by_experiments:
+                raise ValueError(
+                    f"该评测模型正被 {used_by_experiments} 个评测实验使用，请先删除这些实验"
+                )
+            db.execute(
+                "DELETE FROM judge_models WHERE judge_model_id=?", (judge_model_id,)
+            )
+        return True
 
     def list_evaluators(self) -> List[Dict[str, Any]]:
         with self.connection() as db:
@@ -1203,6 +1428,22 @@ class Store:
             """, {**evaluator, "evaluator_id": evaluator_id})
         return self.get_evaluator(evaluator_id)
 
+    def delete_evaluator(self, evaluator_id: str) -> bool:
+        with self._lock, self.connection() as db:
+            exists = db.execute(
+                "SELECT 1 FROM evaluators WHERE evaluator_id=?", (evaluator_id,)
+            ).fetchone()
+            if not exists:
+                return False
+            used = db.execute(
+                "SELECT COUNT(*) FROM experiment_evaluators WHERE evaluator_id=?",
+                (evaluator_id,),
+            ).fetchone()[0]
+            if used:
+                raise ValueError(f"该评测指标正被 {used} 个评测实验使用，请先删除这些实验")
+            db.execute("DELETE FROM evaluators WHERE evaluator_id=?", (evaluator_id,))
+        return True
+
     def list_datasets(self) -> List[Dict[str, Any]]:
         with self.connection() as db:
             return [dict(row) for row in db.execute("""
@@ -1218,6 +1459,51 @@ class Store:
                 VALUES(:dataset_id,:name,:description)
             """, dataset)
         return dataset
+
+    def update_dataset(
+        self, dataset_id: str, dataset: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        with self._lock, self.connection() as db:
+            exists = db.execute(
+                "SELECT 1 FROM eval_datasets WHERE dataset_id=?", (dataset_id,)
+            ).fetchone()
+            if not exists:
+                return None
+            db.execute(
+                "UPDATE eval_datasets SET name=?, description=? WHERE dataset_id=?",
+                (dataset["name"], dataset.get("description", ""), dataset_id),
+            )
+            row = db.execute(
+                "SELECT * FROM eval_datasets WHERE dataset_id=?", (dataset_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def delete_dataset(self, dataset_id: str) -> bool:
+        with self._lock, self.connection() as db:
+            exists = db.execute(
+                "SELECT 1 FROM eval_datasets WHERE dataset_id=?", (dataset_id,)
+            ).fetchone()
+            if not exists:
+                return False
+            used = db.execute(
+                "SELECT COUNT(*) FROM eval_experiments WHERE dataset_id=?",
+                (dataset_id,),
+            ).fetchone()[0]
+            if used:
+                raise ValueError(f"该数据集正被 {used} 个评测实验使用，请先删除这些实验")
+            attempts = db.execute("""
+                SELECT COUNT(*) FROM eval_attempts a
+                JOIN eval_cases c ON c.case_id=a.case_id
+                WHERE c.dataset_id=?
+            """, (dataset_id,)).fetchone()[0]
+            if attempts:
+                raise ValueError(
+                    f"该数据集的 Case 已有 {attempts} 次历史运行记录，删除会破坏运行历史"
+                )
+            # 连接层不一定开启外键约束，显式清理 Case
+            db.execute("DELETE FROM eval_cases WHERE dataset_id=?", (dataset_id,))
+            db.execute("DELETE FROM eval_datasets WHERE dataset_id=?", (dataset_id,))
+        return True
 
     def get_dataset(self, dataset_id: str) -> Optional[Dict[str, Any]]:
         with self.connection() as db:
@@ -1243,6 +1529,51 @@ class Store:
         result = dict(case)
         result["assertions"] = json.loads(result.pop("assertions_json"))
         return result
+
+    def update_case(
+        self, case_id: str, case: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        with self._lock, self.connection() as db:
+            exists = db.execute(
+                "SELECT dataset_id, assertions_json FROM eval_cases WHERE case_id=?",
+                (case_id,),
+            ).fetchone()
+            if not exists:
+                return None
+            # 未提供断言时保留原断言，避免编辑 Case 时把已有验收规则清空
+            assertions_json = (
+                json.dumps(case["assertions"], ensure_ascii=False)
+                if case.get("assertions") is not None
+                else exists["assertions_json"]
+            )
+            # 不允许通过编辑把 Case 挪到其它数据集
+            db.execute("""
+                UPDATE eval_cases SET
+                    name=?, input=?, expected_output=?, assertions_json=?
+                WHERE case_id=?
+            """, (
+                case["name"], case["input"], case.get("expected_output", ""),
+                assertions_json, case_id,
+            ))
+        return self.get_case(case_id)
+
+    def delete_case(self, case_id: str) -> bool:
+        with self._lock, self.connection() as db:
+            exists = db.execute(
+                "SELECT 1 FROM eval_cases WHERE case_id=?", (case_id,)
+            ).fetchone()
+            if not exists:
+                return False
+            used = db.execute(
+                "SELECT COUNT(*) FROM eval_attempts WHERE case_id=?", (case_id,)
+            ).fetchone()[0]
+            if used:
+                raise ValueError(
+                    f"该 Case 已有 {used} 次历史运行记录，删除会破坏运行历史；"
+                    "请先删除引用它的评测实验"
+                )
+            db.execute("DELETE FROM eval_cases WHERE case_id=?", (case_id,))
+        return True
 
     def list_eval_experiments(self) -> List[Dict[str, Any]]:
         with self.connection() as db:
@@ -1319,6 +1650,36 @@ class Store:
             "evaluator_names": None,
             "run_count": 0,
         }
+
+    def delete_eval_experiment(self, experiment_id: str) -> bool:
+        with self._lock, self.connection() as db:
+            exists = db.execute(
+                "SELECT 1 FROM eval_experiments WHERE experiment_id=?",
+                (experiment_id,),
+            ).fetchone()
+            if not exists:
+                return False
+            running = db.execute(
+                "SELECT COUNT(*) FROM eval_runs WHERE experiment_id=? AND status='running'",
+                (experiment_id,),
+            ).fetchone()[0]
+            if running:
+                raise ValueError("该实验正在运行，请等待本次运行结束后再删除")
+            # 连接层不一定开启外键约束，显式清理关联记录；Trace 原样保留
+            db.execute(
+                "DELETE FROM eval_attempts WHERE experiment_id=?", (experiment_id,)
+            )
+            db.execute(
+                "DELETE FROM eval_runs WHERE experiment_id=?", (experiment_id,)
+            )
+            db.execute(
+                "DELETE FROM experiment_evaluators WHERE experiment_id=?",
+                (experiment_id,),
+            )
+            db.execute(
+                "DELETE FROM eval_experiments WHERE experiment_id=?", (experiment_id,)
+            )
+        return True
 
     def get_eval_experiment(self, experiment_id: str) -> Optional[Dict[str, Any]]:
         with self.connection() as db:
@@ -1397,6 +1758,7 @@ class Store:
         return {
             "experiment": dict(exp), "evaluators": evaluators, "cases": cases,
             "runs": runs, "attempts": attempts,
+            "run_batches": self.experiment_run_batches(experiment_id),
             "summary": {
                 "total": total, "passed": passed,
                 "pass_rate": round(passed / total, 4) if total else None,

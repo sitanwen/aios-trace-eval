@@ -380,6 +380,10 @@ def _run_one_case(base_url: str, experiment_id: str, case: Dict[str, Any], *,
                 environment.setdefault("CLAUDE_CODE_ENHANCED_TELEMETRY_BETA", "1")
             elif adapter_name == "dsh":
                 environment.setdefault("OTEL_SERVICE_NAME", "dsh-agent")
+                # DSH 的 deepseek-official 路由必须从环境拿到 API Key
+                api_key = _dsh_api_key(environment)
+                if api_key:
+                    environment["DEEPSEEK_API_KEY"] = api_key
                 # DSH(Node) 不支持 SOCKS 代理，移除 all_proxy 免得报错
                 environment.pop("all_proxy", None)
                 environment.pop("ALL_PROXY", None)

@@ -220,6 +220,12 @@ main {
   white-space: nowrap;
   font-size: 12px;
 }
+.card-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
 .button:disabled {
   opacity: 0.6;
   cursor: wait;
@@ -758,6 +764,21 @@ textarea {
   padding: 20px 22px;
   border-bottom: 1px solid var(--border);
 }
+.drawer-back {
+  flex: 0 0 auto;
+  align-self: center;
+  margin-right: 14px;
+  padding: 7px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+}
+.drawer-back:hover {
+  background: #f6f8fb;
+}
 .modal-head h2,
 .drawer-head h2 {
   font-size: 18px;
@@ -962,6 +983,16 @@ textarea {
 .case-row h4 {
   margin: 0 0 6px;
 }
+.case-row-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+.case-row-head h4 {
+  margin: 0;
+}
 .case-row p {
   color: var(--muted);
   margin: 0;
@@ -1008,6 +1039,62 @@ textarea {
 }
 .experiment-table-wrap tr[data-trace]:hover td {
   background: #f8fafc;
+}
+.run-batch {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 16px 10px;
+  margin-bottom: 14px;
+  background: #fff;
+}
+.run-batch-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.run-batch-head b {
+  font-size: 14px;
+}
+.run-batch-head .muted {
+  display: block;
+  font-size: 12px;
+  margin-top: 3px;
+}
+.run-batch-empty {
+  font-size: 12px;
+  margin: 4px 0 6px;
+}
+.run-error {
+  display: block;
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+  margin-top: 3px;
+}
+.resource-run-picker {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+}
+.resource-run-picker label {
+  font-size: 12px;
+  color: var(--muted);
+}
+.resource-run-picker select {
+  flex: 1;
+  max-width: 420px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  font-size: 13px;
+  background: #fff;
 }
 .span-list {
   border-left: 1px solid var(--border);
@@ -1746,6 +1833,7 @@ textarea {
 .trajectory-kind.assistant { color: #236d5b; }
 .trajectory-kind.tool { color: #6946a5; }
 .trajectory-kind.context { color: #7b5a2d; }
+.trajectory-kind.llm { color: #1f5f8b; }
 .trajectory-content {
   min-width: 0;
   padding: 7px 8px;

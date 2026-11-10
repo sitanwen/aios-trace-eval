@@ -68,7 +68,8 @@ class CaseInput(BaseModel):
     name: str
     input: str
     expected_output: str = ""
-    assertions: list[dict] = []
+    # None 表示编辑时未提供断言，沿用原值；创建时按空列表处理
+    assertions: Optional[list[dict]] = None
 
 
 class JudgeModelInput(BaseModel):
@@ -77,6 +78,15 @@ class JudgeModelInput(BaseModel):
     base_url: str
     model: str
     api_key: str
+
+
+class JudgeModelUpdateInput(BaseModel):
+    name: str
+    provider: str
+    base_url: str
+    model: str
+    # 编辑时留空表示保持原 API Key
+    api_key: str = ""
 
 
 class JudgeRunInput(BaseModel):
@@ -270,8 +280,9 @@ def runs(limit: int = Query(50, ge=1, le=200)) -> list:
 
 
 @app.get("/api/eval-experiments/{experiment_id}/resource-series")
-def experiment_resource_series(experiment_id: str) -> dict:
-    return store.experiment_resource_series(experiment_id)
+def experiment_resource_series(experiment_id: str, run_id: Optional[str] = None) -> dict:
+    """按单次运行批次返回资源曲线；run_id 省略时取最近一次运行。"""
+    return store.experiment_resource_series(experiment_id, run_batch_id=run_id)
 
 
 @app.get("/api/traces/{trace_id}")
@@ -312,6 +323,17 @@ def eval_experiment_detail(experiment_id: str) -> dict:
     if result is None:
         raise HTTPException(status_code=404, detail="experiment not found")
     return result
+
+
+@app.delete("/api/experiments/{experiment_id}")
+def delete_experiment(experiment_id: str) -> dict:
+    try:
+        deleted = store.delete_eval_experiment(experiment_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not deleted:
+        raise HTTPException(status_code=404, detail="experiment not found")
+    return {"ok": True}
 
 
 @app.post("/api/experiments/{experiment_id}/status")
@@ -467,8 +489,7 @@ def agents() -> list:
     return store.list_agents()
 
 
-@app.post("/api/agents", status_code=201)
-def create_agent(body: AgentInput) -> dict:
+def _agent_values(body: AgentInput) -> dict:
     values = body.model_dump()
     values["runtime_type"] = values["runtime_type"] or values["protocol"]
     values["protocol"] = values["runtime_type"]  # compatibility for older runners
@@ -477,9 +498,37 @@ def create_agent(body: AgentInput) -> dict:
         value = values.pop(key)
         if value:
             config[key] = value
+        else:
+            # 编辑时清空该项，需要把旧配置里的键一起移除
+            config.pop(key, None)
     values["config_json"] = json.dumps(config, ensure_ascii=False)
+    return values
+
+
+@app.post("/api/agents", status_code=201)
+def create_agent(body: AgentInput) -> dict:
+    values = _agent_values(body)
     values["agent_id"] = f"agent_{uuid.uuid4().hex[:12]}"
     return store.create_agent(values)
+
+
+@app.put("/api/agents/{agent_id}")
+def update_agent(agent_id: str, body: AgentInput) -> dict:
+    result = store.update_agent(agent_id, _agent_values(body))
+    if result is None:
+        raise HTTPException(status_code=404, detail="agent not found")
+    return result
+
+
+@app.delete("/api/agents/{agent_id}")
+def delete_agent(agent_id: str) -> dict:
+    try:
+        deleted = store.delete_agent(agent_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not deleted:
+        raise HTTPException(status_code=404, detail="agent not found")
+    return {"ok": True}
 
 
 @app.get("/api/judge-models")
@@ -495,6 +544,25 @@ def create_judge_model(body: JudgeModelInput) -> dict:
         "status": "configured",
     })
     return store.create_judge_model(values)
+
+
+@app.put("/api/judge-models/{judge_model_id}")
+def update_judge_model(judge_model_id: str, body: JudgeModelUpdateInput) -> dict:
+    result = store.update_judge_model(judge_model_id, body.model_dump())
+    if result is None:
+        raise HTTPException(status_code=404, detail="judge model not found")
+    return result
+
+
+@app.delete("/api/judge-models/{judge_model_id}")
+def delete_judge_model(judge_model_id: str) -> dict:
+    try:
+        deleted = store.delete_judge_model(judge_model_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not deleted:
+        raise HTTPException(status_code=404, detail="judge model not found")
+    return {"ok": True}
 
 
 @app.post("/api/judge-models/{judge_model_id}/test")
@@ -610,6 +678,17 @@ def update_evaluator(evaluator_id: str, body: EvaluatorInput) -> dict:
     if result is None:
         raise HTTPException(status_code=404, detail="evaluator not found")
     return result
+
+
+@app.delete("/api/evaluators/{evaluator_id}")
+def delete_evaluator(evaluator_id: str) -> dict:
+    try:
+        deleted = store.delete_evaluator(evaluator_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not deleted:
+        raise HTTPException(status_code=404, detail="evaluator not found")
+    return {"ok": True}
 
 
 @app.post("/api/traces/{trace_id}/judge")
@@ -965,6 +1044,25 @@ def create_dataset(body: DatasetInput) -> dict:
     return store.create_dataset(values)
 
 
+@app.put("/api/datasets/{dataset_id}")
+def update_dataset(dataset_id: str, body: DatasetInput) -> dict:
+    result = store.update_dataset(dataset_id, body.model_dump())
+    if result is None:
+        raise HTTPException(status_code=404, detail="dataset not found")
+    return result
+
+
+@app.delete("/api/datasets/{dataset_id}")
+def delete_dataset(dataset_id: str) -> dict:
+    try:
+        deleted = store.delete_dataset(dataset_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not deleted:
+        raise HTTPException(status_code=404, detail="dataset not found")
+    return {"ok": True}
+
+
 @app.get("/api/datasets/{dataset_id}")
 def dataset_detail(dataset_id: str) -> dict:
     result = store.get_dataset(dataset_id)
@@ -973,13 +1071,38 @@ def dataset_detail(dataset_id: str) -> dict:
     return result
 
 
+@app.put("/api/datasets/{dataset_id}/cases/{case_id}")
+def update_case(dataset_id: str, case_id: str, body: CaseInput) -> dict:
+    case = store.get_case(case_id)
+    if case is None or case.get("dataset_id") != dataset_id:
+        raise HTTPException(status_code=404, detail="case not found")
+    result = store.update_case(case_id, body.model_dump())
+    if result is None:
+        raise HTTPException(status_code=404, detail="case not found")
+    return result
+
+
+@app.delete("/api/datasets/{dataset_id}/cases/{case_id}")
+def delete_case(dataset_id: str, case_id: str) -> dict:
+    case = store.get_case(case_id)
+    if case is None or case.get("dataset_id") != dataset_id:
+        raise HTTPException(status_code=404, detail="case not found")
+    try:
+        deleted = store.delete_case(case_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not deleted:
+        raise HTTPException(status_code=404, detail="case not found")
+    return {"ok": True}
+
+
 @app.post("/api/datasets/{dataset_id}/cases", status_code=201)
 def create_case(dataset_id: str, body: CaseInput) -> dict:
     values = body.model_dump(exclude={"assertions"})
     values.update({
         "case_id": f"case_{uuid.uuid4().hex[:12]}",
         "dataset_id": dataset_id,
-        "assertions_json": json.dumps(body.assertions, ensure_ascii=False),
+        "assertions_json": json.dumps(body.assertions or [], ensure_ascii=False),
     })
     try:
         return store.add_case(values)
