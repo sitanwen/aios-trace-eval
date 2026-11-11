@@ -20,7 +20,7 @@ from pydantic import BaseModel
 
 from . import experiment_runner
 from .otlp import decode_traces, normalize_trace_summary
-from .storage import Store
+from .storage import RUNTIME_METRIC_NAMES, Store
 from .metrics import catalog
 from .otlp_metrics import decode_metrics
 from .local_resource import sample_local_process
@@ -1158,7 +1158,10 @@ async def receive_metrics(request: Request) -> Response:
     payload = await request.body()
     try:
         samples = decode_metrics(payload, request.headers.get("content-type", "application/x-protobuf"))
-        store.upsert_metric_samples(samples)
+        # 每秒快照里大部分指标没有任何读取方，只落库资源曲线的白名单；
+        # 否则 metric_samples 会以约每天 580 万行的速度膨胀。
+        stored = [sample for sample in samples if sample["metric_name"] in RUNTIME_METRIC_NAMES]
+        store.upsert_metric_samples(stored)
         if samples and request.client:
             store.upsert_metric_samples(sample_local_process(
                 request.client.host,

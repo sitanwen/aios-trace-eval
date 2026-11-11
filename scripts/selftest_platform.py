@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -125,6 +126,8 @@ def main() -> None:
         ("openclaw.memory.heap_used_bytes", "By", 67_108_864),
         ("openclaw.liveness.cpu_core_ratio", "1", 0.42),
         ("openclaw.liveness.event_loop_utilization", "1", 0.17),
+        # 不在落库白名单里：接收端应丢弃，避免只写不读的指标撑大数据库。
+        ("openclaw.queue.depth", "1", 3),
     ):
         metric = sm.metrics.add(name=name, unit=unit)
         point = metric.histogram.data_points.add(
@@ -224,11 +227,23 @@ def main() -> None:
         assert len(detail["spans"]) == 3
         assert detail["runtime_metrics"]["rss_bytes"]["peak"] == 134_217_728
         assert len(detail["runtime_metrics"]["rss_series"]["points"]) == 1
-        assert detail["runtime_metrics"]["rss_series"]["points"][0]["offset_ms"] == 2000
+        # 曲线偏移量相对序列首个采样点计算，只有一条样本时固定为 0。
+        assert detail["runtime_metrics"]["rss_series"]["points"][0]["offset_ms"] == 0
         assert detail["runtime_metrics"]["sample_scope"] == "trace_interval"
         assert detail["runtime_metrics"]["heap_used_bytes"]["peak"] == 67_108_864
         assert detail["runtime_metrics"]["cpu_core_ratio"]["peak"] == 0.42
         assert len(detail["runtime_metrics"]["cpu_series"]["points"]) == 1
+        db = sqlite3.connect(os.environ["AIOS_DB_PATH"])
+        try:
+            stored_metrics = {
+                row[0] for row in db.execute("SELECT DISTINCT metric_name FROM metric_samples").fetchall()
+            }
+        finally:
+            db.close()
+        assert "openclaw.queue.depth" not in stored_metrics
+        assert "openclaw.liveness.event_loop_utilization" not in stored_metrics
+        assert {"openclaw.memory.rss_bytes", "openclaw.memory.heap_used_bytes",
+                "openclaw.liveness.cpu_core_ratio"} <= stored_metrics
         with patch(
             "aios_trace_eval.app.urllib.request.urlopen",
             return_value=FakeJudgeResponse('{"passed":true,"score":1.0,"reason":"matches"}'),

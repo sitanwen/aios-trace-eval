@@ -13,6 +13,20 @@ from typing import Any, Dict, Iterable, Iterator, List, Optional
 # 历史记录没有 run_batch_id 时，两次执行之间超过这个间隔就视为不同的运行批次。
 RUN_BATCH_GAP_NS = 30 * 60 * 1_000_000_000
 
+# /v1/metrics 只落库资源曲线会读取的指标。OpenClaw Gateway 每秒导出约 70 条时间序列，
+# 队列深度、累计计数器、耗时直方图等只写不读；全量落库会让 metric_samples
+# 每天增加约 580 万行。新增读取方时，把指标名同步加入这里以及下面的查询条件。
+RUNTIME_METRIC_NAMES = frozenset({
+    "process.memory.rss",
+    "process.cpu.utilization",
+    "openclaw.memory.rss_bytes",
+    "openclaw.memory.heap_used_bytes",
+    "openclaw.liveness.cpu_core_ratio",
+    "openclaw.phase.cpu_core_ratio",
+    "openclaw.process.cpu_core_ratio",
+    "openclaw.phase.cpu_total_ms",
+})
+
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;

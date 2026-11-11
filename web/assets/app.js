@@ -124,11 +124,12 @@ const pages={
   judges:{title:'评测模型',desc:'配置独立的 LLM-as-a-Judge 评分模型',action:'添加模型'},
   evaluators:{title:'评测指标',desc:'定义每个 Case 如何评分，以及达到多少分才算通过',action:'创建指标'},
   experiments:{title:'评测实验',desc:'选择 Agent、数据集与评测模型，创建可重复实验',action:'创建实验'},
-  runs:{title:'运行记录',desc:'查看真实采集的 Trace、Token、耗时与评测结论'}
+  runs:{title:'运行记录',desc:'查看真实采集的 Trace、Token、耗时与评测结论'},
+  guide:{title:'接入手册',desc:'把 Agent 的 Trace 接入平台，并配置一键运行实验'}
 };
 
 function route(page){if(!pages[page])page='overview';state.page=page;$$('.page').forEach(node=>node.classList.toggle('active',node.id===`page-${page}`));$$('#nav a').forEach(node=>node.classList.toggle('active',node.dataset.page===page));$('#pageTitle').textContent=pages[page].title;$('#pageDesc').textContent=pages[page].desc;const action=$('#headerAction');action.classList.toggle('hidden',!pages[page].action);action.textContent=pages[page].action||'';location.hash=page;loadPage(page)}
-async function loadPage(page){try{if(page==='overview')await loadOverview();if(page==='agents')await loadAgents();if(page==='datasets')await loadDatasets();if(page==='judges')await loadJudgeModels();if(page==='evaluators')await loadEvaluators();if(page==='experiments')await loadExperiments();if(page==='runs')await loadRuns()}catch(error){toast(error.message)}}
+async function loadPage(page){try{if(page==='overview')await loadOverview();if(page==='agents')await loadAgents();if(page==='datasets')await loadDatasets();if(page==='judges')await loadJudgeModels();if(page==='evaluators')await loadEvaluators();if(page==='experiments')await loadExperiments();if(page==='runs')await loadRuns();if(page==='guide')renderGuide()}catch(error){toast(error.message)}}
 
 async function loadOverview(){const [overview,runs]=await Promise.all([api('/api/overview'),api('/api/traces?limit=5')]);const t=overview.totals;$('#overviewStats').innerHTML=[['运行次数',t.runs],['业务成功率',t.runs?`${(t.success_rate*100).toFixed(1)}%`:'—'],['总 Token',formatNumber(t.tokens)],['P95 耗时',formatDuration(t.p95_duration)]].map(x=>`<div class="stat"><span>${x[0]}</span><b>${x[1]}</b></div>`).join('');renderRuns($('#recentRuns'),runs,'还没有运行数据','完成 Agent 接入并执行任务后，Trace 会显示在这里。')}
 
@@ -284,6 +285,184 @@ function closeDrawer(){setDrawerBack(null);stopExperimentPoll();activeExperiment
 function toast(message){const node=$('#toast');node.textContent=message;node.classList.add('show');clearTimeout(node.timer);node.timer=setTimeout(()=>node.classList.remove('show'),2400)}
 
 async function checkOtlp(){const button=$('#checkOtlp'),dot=$('#otlpStatusDot'),text=$('#otlpStatusText'),detail=$('#otlpStatusDetail');button.disabled=true;button.textContent='检测中';dot.className='otlp-status-dot checking';text.textContent='端到端检测中';detail.textContent='发送、解析、落库、回查';try{const result=await api('/api/health/otlp/test',{method:'POST'});dot.className='otlp-status-dot active';text.textContent='OTLP 可用';detail.textContent=`完整链路通过 · ${result.latency_ms}ms`;toast('OTLP 端到端检测通过：发送、解析、落库和回查均正常')}catch(error){dot.className='otlp-status-dot error';text.textContent='OTLP 不可用';detail.textContent=error.message;toast(error.message)}finally{button.disabled=false;button.textContent='检测'}}
+
+let guidePlatform='openclaw';
+function guidePlatformList(origin){
+  return [
+    {
+      key:'openclaw',name:'OpenClaw',icon:'O',tagline:'Gateway 长驻',
+      summary:'通过 diagnostics-otel 插件上报 Trace 与指标。平台既可以直接观测 Gateway，也可以在「评测实验」里一键运行，并按 Gateway 进程采集 CPU / RSS。',
+      tags:['Trace 观测','评测评分','一键跑实验','Gateway 进程资源'],
+      steps:[
+        {
+          title:'配置 OTLP 上报',
+          desc:'在 openclaw.json 的 diagnostics.otel 中把 endpoint 指向平台。endpoint 只写到服务地址，不要带 /v1/traces；captureContent 默认关闭，开启后才会采集 Prompt、响应和工具原文。',
+          code:`// openclaw.json
+{
+  diagnostics: {
+    enabled: true,
+    otel: {
+      endpoint: "${origin}",
+      protocol: "http/protobuf",
+      serviceName: "openclaw-eval",
+      traces: true,
+      metrics: true,
+      logs: false,
+      flushIntervalMs: 1000,
+      captureContent: false,
+    },
+  },
+}`
+        },
+        {
+          title:'重启 Gateway 并执行一次真实任务',
+          desc:'重启后确认日志中 diagnostics-otel 已加载、没有导出错误，再让 Gateway 完整走一次模型请求。',
+          code:'openclaw agent "<任务>"'
+        },
+        {
+          title:'在平台登记 Agent（用于一键跑实验）',
+          desc:'打开「Agent」页 → 接入 Agent。只做观测可以选「仅观测」；要在平台里批量执行数据集，选 Gateway 并填写 Gateway 的 HTTP 地址。',
+          code:`Agent 平台：OpenClaw
+运行方式：Gateway
+连接地址：http://127.0.0.1:18789`
+        }
+      ],
+      verify:[
+        '「运行记录」出现 service.name 为所配 serviceName 的 Trace，且 total_tokens > 0。',
+        '只有健康检查、没有模型 Span 的 Trace 不能当作评测样本。',
+        '资源曲线反映共享 Gateway 进程，不是单次请求独占内存。'
+      ]
+    },
+    {
+      key:'dsh',name:'DeepSeek Harness',icon:'D',tagline:'Local CLI 推荐',
+      summary:'通过 @loongsuite/dsh-plugin 在进程内导出 OTLP。平台推荐用「本地 CLI」方式启动 dsh，逐个执行 Case，并采集整个进程树的 CPU / RSS。',
+      tags:['Trace 观测','评测评分','一键跑实验','进程树资源'],
+      steps:[
+        {
+          title:'安装 DSH 采集插件',
+          desc:'插件在 DSH 进程内直接导出 OTLP/HTTP，不需要额外部署 Collector。',
+          code:'dsh plugin --profile headless add @loongsuite/dsh-plugin'
+        },
+        {
+          title:'设置遥测环境变量并运行',
+          desc:'环境变量要对平台启动 dsh 的进程可见；只做观测时，在任意终端按同样配置运行即可。',
+          code:`export OTEL_SERVICE_NAME=dsh-agent
+export OTEL_TRACES_EXPORTER=otlp
+export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+export OTEL_EXPORTER_OTLP_ENDPOINT=${origin}
+
+dsh --profile headless "<任务>"`
+        },
+        {
+          title:'在平台登记 Agent',
+          desc:'打开「Agent」页 → 平台选 DeepSeek Harness，运行方式选「本地 CLI」。平台负责启动进程、采集进程树资源并读取最终输出，因此 dsh 必须能被平台进程访问。',
+          code:`Agent 平台：DeepSeek Harness
+运行方式：本地 CLI（推荐）
+可执行文件：dsh（留空时使用 PATH）
+Profile：headless
+工作目录：任务所在目录`
+        }
+      ],
+      verify:[
+        '「运行记录」出现 service.name=dsh-agent 的 Trace，且 total_tokens > 0。',
+        'DSH 的 Token 口径是 input + output；cache_read 已包含在 input 内，不重复累加。',
+        '本地 CLI 运行结束后，运行详情里能看到进程树 RSS / CPU 曲线。'
+      ]
+    },
+    {
+      key:'claude_code',name:'Claude Code',icon:'C',tagline:'Local CLI 推荐',
+      summary:'Claude Code 内置 OTel 遥测，按 Anthropic 口径上报 token。平台推荐用「本地 CLI」方式执行 claude --print，并采集进程树资源。',
+      tags:['Trace 观测','评测评分','一键跑实验','进程树资源'],
+      steps:[
+        {
+          title:'开启 Claude Code 遥测',
+          desc:'分布式 Trace 目前是 beta，需要同时打开两个开关。内容默认脱敏；只有显式开启 OTEL_LOG_USER_PROMPTS 等变量才会带原文。',
+          code:`export CLAUDE_CODE_ENABLE_TELEMETRY=1
+export CLAUDE_CODE_ENHANCED_TELEMETRY_BETA=1
+export OTEL_TRACES_EXPORTER=otlp
+export OTEL_METRICS_EXPORTER=otlp
+export OTEL_LOGS_EXPORTER=otlp
+export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+export OTEL_EXPORTER_OTLP_ENDPOINT=${origin}
+export OTEL_SERVICE_NAME=claude-code`
+        },
+        {
+          title:'以非交互方式运行一次',
+          desc:'--print 适合批量评测；运行结束时平台 Runner 会读取标准输出作为 Agent 最终回答。',
+          code:'claude --print "<任务>"'
+        },
+        {
+          title:'在平台登记 Agent',
+          desc:'打开「Agent」页 → 平台选 Claude Code，运行方式选「本地 CLI」。可执行文件留空时使用 PATH 中的 claude，也可以用「附加参数」传入权限模式等参数。',
+          code:`Agent 平台：Claude Code
+运行方式：本地 CLI（推荐）
+可执行文件：claude
+模型：可选，留空使用 Claude Code 默认模型`
+        }
+      ],
+      verify:[
+        '「运行记录」出现 service.name=claude-code 的 Trace，且 total_tokens > 0。',
+        'Claude Code 的 Token 口径是 input + output + cache_read + cache_write。',
+        '默认不采集原文；需要按轨迹内容评分时，在受控环境开启内容采集变量。'
+      ]
+    },
+    {
+      key:'generic',name:'更多平台',icon:'+',tagline:'通用 GenAI',
+      summary:'任何输出标准 gen_ai.* Span 的运行时都可以先按通用方式接入；专用适配器会在接收端自动识别，这个页面也会同步补充。',
+      tags:['Trace 观测','评测评分','仅观测'],
+      steps:[
+        {
+          title:'设置 OTLP 环境变量',
+          desc:'适用于 OpenAI 兼容的 GenAI 应用，或任何已经接入 OpenTelemetry 的 Agent 运行时。',
+          code:`export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+export OTEL_EXPORTER_OTLP_ENDPOINT=${origin}`
+        },
+        {
+          title:'应用侧产出标准 gen_ai.* Span',
+          desc:'使用 opentelemetry-instrumentation-openai 或同类埋点，模型、Token 与工具调用会被平台自动归一化。',
+          code:'opentelemetry-instrumentation-openai'
+        },
+        {
+          title:'在平台登记 Agent',
+          desc:'打开「Agent」页 → 平台选「通用 GenAI」，运行方式只能是「仅观测」：平台接收并评测 Trace，但不会主动执行任务。'
+        }
+      ],
+      verify:[
+        '「运行记录」能按 gen_ai.* 字段识别 model / provider 并显示 Token。',
+        '新增专用平台后，适配器会自动识别；页面会补上对应的接入步骤。'
+      ]
+    }
+  ];
+}
+
+function renderGuide(){
+  const origin=location.origin.replace(/\/$/,'');
+  const platforms=guidePlatformList(origin);
+  const current=platforms.find(item=>item.key===guidePlatform)||platforms[0];
+  $('#guideContent').innerHTML=`
+    <div class="notice-card guide-intro">
+      <div>
+        <b>接入 = 让 Agent 把 OTLP Trace 报到 <code>${escapeHtml(origin)}</code></b>
+        <p>所有平台统一使用 OTLP/HTTP + http/protobuf，接收地址不要带 <code>/v1/traces</code>。只做观测时完成第 1 步即可；要一键跑实验，再到「Agent」页登记执行方式。</p>
+      </div>
+      <div class="guide-flow"><span>1 配置上报</span><em>→</em><span>2 登记 Agent</span><em>→</em><span>3 创建实验</span></div>
+    </div>
+    <div class="guide-tabs">${platforms.map(item=>`<button type="button" class="guide-tab ${item.key===current.key?'active':''}" data-guide-tab="${item.key}"><i>${escapeHtml(item.icon)}</i>${escapeHtml(item.name)}</button>`).join('')}</div>
+    <article class="guide-card">
+      <header class="guide-card-head">
+        <div class="resource-icon">${escapeHtml(current.icon)}</div>
+        <div class="guide-card-title"><div class="agent-title"><h3>${escapeHtml(current.name)}</h3><span class="tag">${escapeHtml(current.tagline)}</span></div><p>${escapeHtml(current.summary)}</p></div>
+        <div class="guide-tags">${current.tags.map(tag=>`<span class="capability active">${escapeHtml(tag)}</span>`).join('')}</div>
+      </header>
+      <div class="guide-steps">${current.steps.map((step,index)=>`<section class="guide-step"><div class="guide-step-head"><span>${index+1}</span><h4>${escapeHtml(step.title)}</h4></div><p>${escapeHtml(step.desc)}</p>${step.code?`<div class="guide-code"><button type="button" class="button small guide-copy">复制</button><pre class="snippet">${escapeHtml(step.code)}</pre></div>`:''}</section>`).join('')}</div>
+      <div class="guide-verify"><b>接入验证</b><ul>${current.verify.map(item=>`<li>${escapeHtml(item)}</li>`).join('')}</ul></div>
+    </article>`;
+  $$('[data-guide-tab]').forEach(button=>button.onclick=()=>{guidePlatform=button.dataset.guideTab;renderGuide()});
+  $$('.guide-copy').forEach(button=>button.onclick=()=>{
+    const text=button.parentElement.querySelector('pre')?.textContent||'';
+    if(navigator.clipboard?.writeText){navigator.clipboard.writeText(text).then(()=>toast('已复制接入配置')).catch(()=>toast('复制失败，请手动复制'))}else{toast('复制失败，请手动复制')}
+  });
+}
 
 function bind(){$$('#nav a').forEach(link=>link.onclick=event=>{event.preventDefault();route(link.dataset.page)});document.addEventListener('click',event=>{const runButton=event.target.closest('[data-run-experiment]');if(runButton){event.preventDefault();event.stopPropagation();startExperimentFromCard(runButton.dataset.runExperiment);return}const target=event.target.closest('[data-goto],[data-empty-action],[data-experiment]');if(target?.dataset.goto)route(target.dataset.goto);if(target?.dataset.emptyAction)handleAction(target.dataset.emptyAction);if(target?.dataset.experiment)openExperiment(target.dataset.experiment).catch(error=>toast(error.message))});document.addEventListener('keydown',event=>{const target=event.target.closest?.('[data-experiment]');if(target&&(event.key==='Enter'||event.key===' ')){event.preventDefault();openExperiment(target.dataset.experiment).catch(error=>toast(error.message))}if(event.key==='Escape'){closeModal();closeDrawer()}});$('#headerAction').onclick=()=>handleAction({agents:'agent',datasets:'dataset',judges:'judge',evaluators:'evaluator',experiments:'experiment'}[state.page]);$('#modalClose').onclick=closeModal;$('#modalBackdrop').onclick=event=>{if(event.target===$('#modalBackdrop'))closeModal()};$('#modalForm').onsubmit=async event=>{try{if(event.currentTarget.dataset.kind==='case'){event.preventDefault();await submitCase(event)}else await submitModal(event)}catch(error){toast(error.message)}};$('#drawerClose').onclick=closeDrawer;$('#drawerBack').onclick=()=>{const target=drawerBack;setDrawerBack(null);if(target)target()};$('#drawerBackdrop').onclick=closeDrawer;$('#runSearch').onkeydown=event=>{if(event.key==='Enter')loadRuns()};$('#runStatus').onchange=loadRuns;$('#evaluatorDimension').onchange=loadEvaluators;$('#evaluatorType').onchange=loadEvaluators;$('#checkOtlp').onclick=checkOtlp}
 async function handleAction(kind){if(kind==='evaluator')await loadJudgeModels();if(kind==='experiment'){await Promise.all([loadAgents(),loadDatasets(),loadJudgeModels(),loadEvaluators()]);if(!state.agents.length||!state.datasets.length){toast('请先接入 Agent 并创建数据集');return}}openModal(kind)}
