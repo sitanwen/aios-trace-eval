@@ -4,11 +4,14 @@ import sys
 
 sys.path.insert(0, "src")
 
+from aios_trace_eval.adapters.hermes.normalizer import HermesAdapter
+from aios_trace_eval.adapters.registry import select_adapter
 from aios_trace_eval.extractor import extract_run_metrics, aggregate
 from aios_trace_eval.otlp import _is_run_trace
 from aios_trace_eval.evalset import EvalCase, RuleAssertion
 from aios_trace_eval.judge import judge_case, evaluate_set, build_report
 from aios_trace_eval.code_eval import UnsafeExpression, evaluate_expression, normalize_number
+from aios_trace_eval.experiment_runner import _adapter_name_for_protocol
 from aios_trace_eval.runner import RunResult
 
 
@@ -58,7 +61,78 @@ def make_trace():
     }
 
 
+def test_hermes_adapter():
+    def span(span_id, name, attrs, start, end, status="ok"):
+        return {
+            "span_id": span_id,
+            "parent_span_id": "",
+            "name": name,
+            "started_at_ns": start,
+            "ended_at_ns": end,
+            "duration_ms": (end - start) / 1_000_000,
+            "status": status,
+            "attributes_json": json.dumps(attrs),
+        }
+
+    spans = [
+        span("h1", "hermes.session", {
+            "hermes.span.kind": "AGENT", "hermes.session.id": "sess-hermes",
+        }, 1_000_000_000, 5_000_000_000),
+        span("h2", "hermes.turn", {
+            "hermes.span.kind": "CHAIN", "hermes.turn.index": 0,
+        }, 1_100_000_000, 4_900_000_000),
+        span("h3", "chat test-model", {
+            "hermes.span.kind": "LLM",
+            "gen_ai.operation.name": "chat",
+            "gen_ai.system": "hermes-agent",
+            "gen_ai.request.model": "test-model",
+            "gen_ai.usage.input_tokens": 100,
+            "gen_ai.usage.output_tokens": 50,
+            "hermes.cache.read_tokens": 20,
+            "hermes.cache.write_tokens": 10,
+            "hermes.reasoning_tokens": 5,
+            "hermes.provider": "openai",
+        }, 1_200_000_000, 2_000_000_000),
+        span("h4", "hermes.tool.shell", {
+            "hermes.span.kind": "TOOL", "hermes.tool.name": "shell",
+        }, 2_100_000_000, 2_500_000_000, "error"),
+    ]
+    adapter = HermesAdapter()
+    run = adapter.normalize_run(
+        spans, {"service.name": "hermes-agent", "aios.run.id": "run-hermes"}, "trace-hermes"
+    )
+    assert run.run_id == "run-hermes"
+    assert run.model == "test-model" and run.provider == "openai"
+    assert (run.tokens.input, run.tokens.output) == (100, 50)
+    assert (run.tokens.cache_read, run.tokens.cache_write) == (20, 10)
+    assert run.tokens.reasoning == 5
+    # Hermes 口径：reasoning 已含在 output，不重复加
+    assert run.tokens.total == 180, f"total={run.tokens.total}"
+    assert run.model_calls == 1
+    assert run.tool_calls == 1 and run.tool_errors == 1
+    # 工具失败单独计数，不把整次 run 标成 runtime_error
+    assert run.runtime_status == "completed"
+    assert run.duration_ms == 4000.0
+    assert select_adapter(spans, {"service.name": "hermes-agent"}).name == "hermes"
+    stdout = (
+        '{"type":"system","subtype":"init"}\n'
+        '{"type":"text","text":"partial"}\n'
+        '{"type":"result","text":"final answer"}\n'
+    )
+    assert adapter.parse_output(stdout) == "final answer"
+    noisy = "  ⚠ tirith security scanner enabled but not available — x\n第一行\n第二行\nsession_id: s1\n"
+    assert adapter.parse_output(noisy) == "第一行\n第二行"
+    command = adapter.build_command(
+        {"input": "hello"}, {"model": "test-model", "profile": "", "extra_args": []}
+    )
+    assert command == [
+        "hermes", "chat", "-Q", "--model", "test-model", "-q", "hello",
+    ], command
+    assert _adapter_name_for_protocol("hermes") == "hermes"
+
+
 def main():
+    test_hermes_adapter()
     assert not _is_run_trace([{"name": "openclaw.diagnostic.phase"}])
     assert not _is_run_trace([{"name": "openclaw.model.usage"}])
     assert _is_run_trace([{"name": "openclaw.run"}, {"name": "openclaw.model.call"}])

@@ -107,7 +107,7 @@ def _adapter_name_for_protocol(protocol: Optional[str]) -> str:
     name = (protocol or "").strip().lower()
     if name in {"", "openclaw", "openclaw_gateway"}:
         return "openclaw"
-    if name in {"claude_code", "dsh", "generic"}:
+    if name in {"claude_code", "dsh", "hermes", "generic"}:
         return name
     return "openclaw"
 
@@ -335,7 +335,7 @@ def _run_one_case(base_url: str, experiment_id: str, case: Dict[str, Any], *,
     environment = os.environ.copy()
     _set_run_resource_attributes(
         environment, run_id, case["case_id"], experiment_id,
-        include_run_id=adapter_name in {"claude_code", "dsh"},
+        include_run_id=adapter_name in {"claude_code", "dsh", "hermes"},
     )
     before = {item["trace_id"] for item in _request(base_url, "/api/traces?limit=200")}
     invocation_started_ns = time.time_ns()
@@ -360,7 +360,8 @@ def _run_one_case(base_url: str, experiment_id: str, case: Dict[str, Any], *,
                 "session_id": session_id,
                 "timeout": timeout_s,
                 "model": agent_config.get("model") or environment.get("AIOS_AGENT_MODEL"),
-                "profile": agent_config.get("profile") or environment.get("AIOS_AGENT_PROFILE") or "headless",
+                "profile": agent_config.get("profile") or environment.get("AIOS_AGENT_PROFILE")
+                           or ("headless" if adapter_name == "dsh" else ""),
                 "extra_args": configured_args or
                               shlex.split(environment.get("AIOS_AGENT_EXTRA_ARGS") or ""),
                 "executable": agent_config.get("executable"),
@@ -378,6 +379,12 @@ def _run_one_case(base_url: str, experiment_id: str, case: Dict[str, Any], *,
                 environment.setdefault("OTEL_SERVICE_NAME", "claude-code")
                 environment.setdefault("CLAUDE_CODE_ENABLE_TELEMETRY", "1")
                 environment.setdefault("CLAUDE_CODE_ENHANCED_TELEMETRY_BETA", "1")
+            elif adapter_name == "hermes":
+                environment.setdefault("OTEL_SERVICE_NAME", "hermes-agent")
+                # hermes-plugin-otel-tracing 的开关与导出方式
+                environment.setdefault("HERMES_OTEL_ENABLED", "true")
+                environment.setdefault("HERMES_OTEL_EXPORTER", "otlp")
+                environment.setdefault("HERMES_OTEL_CAPTURE_CONTENT", "false")
             elif adapter_name == "dsh":
                 environment.setdefault("OTEL_SERVICE_NAME", "dsh-agent")
                 # DSH 的 deepseek-official 路由必须从环境拿到 API Key
@@ -422,7 +429,7 @@ def _run_one_case(base_url: str, experiment_id: str, case: Dict[str, Any], *,
     candidate_id = None
     candidate_since = None
     while time.time() < deadline:
-        if adapter_name in {"claude_code", "dsh"}:
+        if adapter_name in {"claude_code", "dsh", "hermes"}:
             try:
                 exact = _request(base_url, f"/api/traces/by-run-id/{run_id}")["trace"]
                 if exact.get("runtime_status") == "completed" \

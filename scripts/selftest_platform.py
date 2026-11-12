@@ -267,6 +267,69 @@ def main() -> None:
         overview = client.get("/api/overview").json()
         assert overview["totals"]["tokens_per_success"] == 1000
         assert client.get("/").status_code == 200
+
+        # Hermes：验证 OTLP 接收 → 适配器自动识别 → token/tool 归一化
+        hermes_request = ExportTraceServiceRequest()
+        hres = hermes_request.resource_spans.add()
+        hres.resource.attributes.extend([
+            kv("service.name", "hermes-agent"),
+            kv("aios.run.id", "run-hermes"),
+            kv("aios.case.id", case.json()["case_id"]),
+        ])
+        hscope = hres.scope_spans.add()
+        hscope.scope.name = "hermes-agent.otel_tracing"
+        htrace = bytes.fromhex("11" * 16)
+        hsession = hscope.spans.add(
+            trace_id=htrace, span_id=bytes.fromhex("21" * 8),
+            name="hermes.session", start_time_unix_nano=1_000_000_000,
+            end_time_unix_nano=5_000_000_000, status=Status(code=Status.STATUS_CODE_OK),
+        )
+        hsession.attributes.extend([
+            kv("hermes.span.kind", "AGENT"), kv("hermes.session.id", "sess-hermes"),
+        ])
+        hscope.spans.add(
+            trace_id=htrace, span_id=bytes.fromhex("22" * 8),
+            parent_span_id=hsession.span_id, name="hermes.turn",
+            start_time_unix_nano=1_100_000_000, end_time_unix_nano=4_900_000_000,
+            status=Status(code=Status.STATUS_CODE_OK),
+        )
+        hchat = hscope.spans.add(
+            trace_id=htrace, span_id=bytes.fromhex("23" * 8),
+            parent_span_id=hsession.span_id, name="chat test-model",
+            start_time_unix_nano=1_200_000_000, end_time_unix_nano=2_000_000_000,
+            status=Status(code=Status.STATUS_CODE_OK),
+        )
+        hchat.attributes.extend([
+            kv("hermes.span.kind", "LLM"),
+            kv("gen_ai.operation.name", "chat"),
+            kv("gen_ai.system", "hermes-agent"),
+            kv("gen_ai.request.model", "test-model"),
+            kv("gen_ai.usage.input_tokens", 100),
+            kv("gen_ai.usage.output_tokens", 50),
+            kv("hermes.cache.read_tokens", 20),
+            kv("hermes.cache.write_tokens", 10),
+            kv("hermes.reasoning_tokens", 5),
+            kv("hermes.provider", "openai"),
+        ])
+        htool = hscope.spans.add(
+            trace_id=htrace, span_id=bytes.fromhex("24" * 8),
+            parent_span_id=hsession.span_id, name="hermes.tool.shell",
+            start_time_unix_nano=2_100_000_000, end_time_unix_nano=2_500_000_000,
+            status=Status(code=Status.STATUS_CODE_ERROR),
+        )
+        htool.attributes.extend([
+            kv("hermes.span.kind", "TOOL"), kv("hermes.tool.name", "shell"),
+        ])
+        hermes_response = client.post(
+            "/v1/traces", content=hermes_request.SerializeToString(),
+            headers={"content-type": "application/x-protobuf"},
+        )
+        assert hermes_response.status_code == 200, hermes_response.text
+        hermes_trace = client.get("/api/traces/by-run-id/run-hermes").json()["trace"]
+        assert hermes_trace["total_tokens"] == 180, hermes_trace
+        assert hermes_trace["model"] == "test-model"
+        assert hermes_trace["tool_calls"] == 1
+        assert hermes_trace["tool_errors"] == 1
     print("PLATFORM SELFTEST PASSED")
 
 

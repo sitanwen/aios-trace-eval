@@ -9,7 +9,7 @@
 ## 2. 数据流
 
 ```text
-Agent 运行时（DSH / Claude Code / OpenClaw ...）
+Agent 运行时（DSH / Claude Code / Hermes / OpenClaw ...）
   内置 OTel 仪表，经 OTLP/HTTP 上报
         │
         ▼
@@ -51,7 +51,7 @@ OTLP 接收与 protobuf 解码对所有平台一致。平台差异仅存在于�
 Trace 关联按执行模型区分：
 
 - OpenClaw Gateway 不继承启动 CLI 时的资源属性，按执行前后的新增 Trace、时间窗和完成状态关联；
-- Claude Code / DSH Local CLI 是 Runner 的直接子进程，优先使用继承的关联属性精确匹配；
+- Claude Code / DSH / Hermes Local CLI 是 Runner 的直接子进程，优先使用继承的关联属性精确匹配；
 - 如果 CLI 插件没有导出关联属性，降级为同 `service.name` 的新增 Trace，并按模型调用、Token 与跨度选择主 Trace。
 
 `run_id` 只作为平台内部 Attempt 标识。Gateway 关联不依赖它，资源曲线也由
@@ -64,6 +64,7 @@ Attempt 与最终 Trace 的显式关系完成关联。
 | `generic` | 任意标准 GenAI 输出 | 标准 `gen_ai.*` | 由具体平台决定 |
 | `dsh` | DeepSeek Harness | 插件 Trace + Runner 进程树采样 | `dsh --profile headless` |
 | `claude_code` | Claude Code | 内置 OTel Trace + Runner 进程树采样 | `claude --print` |
+| `hermes` | Hermes Agent（Nous Research） | hermes-plugin-otel-tracing + Runner 进程树采样 | `hermes chat -Q -q` |
 | `openclaw` | OpenClaw | Gateway OTel | Gateway runner |
 
 ## 6. Token 口径差异（归一化必须处理）
@@ -83,10 +84,17 @@ Attempt 与最终 Trace 的显式关系完成关联。
 - `total = input + output + cache_read + cache_write`；
 - 工具仅以 `claude_code.tool` 计数，子 span 不重复统计。
 
+**Hermes（hermes-plugin-otel-tracing）**
+
+- `input_tokens` 是未命中缓存的输入，`cache_read` / `cache_write` 独立存储；
+- `reasoning` 已包含在 `output` 中，不重复累加；
+- `total = input + output + cache_read + cache_write`；
+- 工具以 `hermes.tool.*` span 计数，结果 JSON 含 `error` 时记为工具错误。
+
 ## 7. 运行模式
 
 - `gateway`：OpenClaw 等持久服务；资源数据代表共享 Gateway 进程。
-- `local_cli`：Claude Code / DSH 的推荐评测方式；平台启动进程、采集进程树并取得最终输出。
+- `local_cli`：Claude Code / DSH / Hermes 的推荐评测方式；平台启动进程、采集进程树并取得最终输出。
 - `observe_only`：只接收外部 Trace，不允许平台主动执行数据集。
 
 Remote Worker 尚未作为产品能力开放；在协议、鉴权和心跳完成前不在前端展示。

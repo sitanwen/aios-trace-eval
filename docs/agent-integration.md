@@ -1,6 +1,6 @@
 # Agent 接入指南
 
-平台通过 **OTLP/HTTP** 接收各 Agent 的 trace，并**自动识别平台**（Claude Code / DeepSeek Harness / OpenClaw / 通用 GenAI），统一归一化后入库、评测、展示。因此「接入」本质上是：
+平台通过 **OTLP/HTTP** 接收各 Agent 的 trace，并**自动识别平台**（Claude Code / DeepSeek Harness / OpenClaw / Hermes / 通用 GenAI），统一归一化后入库、评测、展示。因此「接入」本质上是：
 
 > 让你的 Agent 把 OTLP trace 报到平台的 `/v1/traces` 地址。
 
@@ -14,9 +14,9 @@
 |---|---|
 | **观测**：agent 推 trace → 前端「运行记录」看到归一化结果 | ✅ 全部平台 |
 | **评测评分**：对入库 trace 跑规则/Judge 评估 | ✅ 全部平台 |
-| **一键跑实验**（平台主动调用 agent 逐个执行 case） | ✅ OpenClaw Gateway、Claude Code/DSH Local CLI |
+| **一键跑实验**（平台主动调用 agent 逐个执行 case） | ✅ OpenClaw Gateway、Claude Code/DSH/Hermes Local CLI |
 
-Claude Code / DSH 使用 Local CLI 模式时，平台直接启动 CLI，并采集完整进程树的 CPU 与 RSS。Trace 优先精确关联，无法携带关联属性时按同平台新增 Trace 与执行时间窗回退。Remote Worker 尚未开放；其它机器目前使用“仅观测”模式。
+Claude Code / DSH / Hermes 使用 Local CLI 模式时，平台直接启动 CLI，并采集完整进程树的 CPU 与 RSS。Trace 优先精确关联，无法携带关联属性时按同平台新增 Trace 与执行时间窗回退。Remote Worker 尚未开放；其它机器目前使用“仅观测”模式。
 
 ---
 
@@ -72,7 +72,27 @@ dsh --profile headless "<任务>"
 执行：既可在平台「评测实验」里一键运行，也可直接 `openclaw agent "<任务>"`。
 > 对应样例：`config/openclaw-otel.json5`。
 
-## 4. 通用 GenAI（OpenAI 兼容，如 opentelemetry-instrumentation-openai 埋点）
+## 4. Hermes Agent（Nous Research）
+
+```bash
+# 安装到 Hermes 实际使用的 Python 环境
+python -m pip install hermes-plugin-otel-tracing
+
+export HERMES_OTEL_ENABLED=true
+export HERMES_OTEL_EXPORTER=otlp
+export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+export OTEL_EXPORTER_OTLP_ENDPOINT=<AIOS_HOST>
+export OTEL_SERVICE_NAME=hermes-agent
+
+hermes chat -Q -q "<任务>"
+```
+
+> 插件产出 `hermes.session → hermes.turn → chat <model> / hermes.tool.<name>` 层级。
+> Token 口径：`input` 为未命中缓存的输入，`total = input + output + cache_read + cache_write`；
+> `reasoning` 已包含在 `output` 中，不重复累加。
+> 内容默认不采集；受控环境可设置 `HERMES_OTEL_CAPTURE_CONTENT=true`。
+
+## 5. 通用 GenAI（OpenAI 兼容，如 opentelemetry-instrumentation-openai 埋点）
 
 ```bash
 export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
@@ -83,24 +103,26 @@ export OTEL_EXPORTER_OTLP_ENDPOINT=<AIOS_HOST>
 
 ---
 
-## 5. 如何确认接入成功
+## 6. 如何确认接入成功
 
 去前端「运行记录」页，应看到一条对应平台的 trace：
 
 - **Claude Code**：`model=claude-sonnet-4`（或你的默认模型）、`service=claude-code`，`total_tokens > 0`；
 - **DSH**：`service=dsh-agent`，`total_tokens > 0`；
 - **OpenClaw**：`service` 为你的 openclaw serviceName；
+- **Hermes**：`service=hermes-agent`，`total_tokens > 0`，轨迹里有 `chat <model>` 与 `hermes.tool.*`；
 - **通用 GenAI**：`model/provider` 来自 `gen_ai.*` 字段。
 
 如果 trace 出现但 `total_tokens = 0`，通常是该平台上报的 token 字段名和适配器假设不一致，把原始 span 属性发出来即可定位。
 
 ---
 
-## 6. 平台如何识别（排查用）
+## 7. 平台如何识别（排查用）
 
 | 平台 | 识别特征 | token 口径 |
 |---|---|---|
 | Claude Code | span 名 `claude_code.*` | `input/output/cache_read/cache_creation_tokens`，total = input+output+cache_read+cache_write |
 | DSH | span 名 `chat / execute_tool / invoke_agent` + `gen_ai.*` | total = input + output（cache_read 是 input 子集）|
 | OpenClaw | span 名 `openclaw.*` | total = input+output+cache_read+cache_write+reasoning |
+| Hermes | span 名 `hermes.session / hermes.turn / hermes.tool.*` | total = input+output+cache_read+cache_write（reasoning 含在 output）|
 | 通用 GenAI | 标准 `gen_ai.*` | total = 各分类之和 |
