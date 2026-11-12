@@ -1783,7 +1783,7 @@ textarea {
 .trajectory-columns,
 .trajectory-row {
   display: grid;
-  grid-template-columns: 42px 92px minmax(0, 1fr) 74px;
+  grid-template-columns: 42px 92px minmax(0, 1fr) 112px;
 }
 .trajectory-columns {
   align-items: center;
@@ -1822,7 +1822,17 @@ textarea {
   font: 10px/1 ui-monospace, SFMono-Regular, Consolas, monospace;
   padding: 0 8px;
 }
-.trajectory-time { text-align: right; }
+.trajectory-time {
+  align-items: flex-end;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  text-align: right;
+}
+.trajectory-time small {
+  color: var(--subtle);
+  font-size: 9px;
+}
 .trajectory-kind,
 .raw-span-kind {
   color: #475569;
@@ -1964,6 +1974,21 @@ textarea {
   color: var(--muted);
   font-size: 9px;
   font-style: normal;
+}
+.span-inspector-times {
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+  display: flex;
+  flex-wrap: wrap;
+  font: 10px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace;
+  gap: 14px;
+  padding: 10px 14px;
+}
+.span-inspector-times span {
+  white-space: nowrap;
+}
+.detail-section #viewLatestRun {
+  margin-top: 12px;
 }
 .span-explorer > section {
   max-height: 650px;
