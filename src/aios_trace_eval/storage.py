@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS traces (
     trace_id TEXT PRIMARY KEY,
     run_id TEXT,
     service_name TEXT NOT NULL DEFAULT 'openclaw',
+    ingest_source TEXT NOT NULL DEFAULT 'otlp',
     case_id TEXT,
     experiment_id TEXT,
     version TEXT,
@@ -359,6 +360,8 @@ class Store:
             for name in ("input_text", "output_text"):
                 if name not in trace_columns:
                     db.execute(f"ALTER TABLE traces ADD COLUMN {name} TEXT")
+            if "ingest_source" not in trace_columns:
+                db.execute("ALTER TABLE traces ADD COLUMN ingest_source TEXT NOT NULL DEFAULT 'otlp'")
             attempt_columns = {row[1] for row in db.execute("PRAGMA table_info(eval_attempts)")}
             if "run_batch_id" not in attempt_columns:
                 db.execute("ALTER TABLE eval_attempts ADD COLUMN run_batch_id TEXT")

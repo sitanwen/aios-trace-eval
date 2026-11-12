@@ -123,7 +123,10 @@ def decode_traces(payload: bytes, content_type: str) -> Tuple[List[Dict[str, Any
 def normalize_trace_summary(spans: List[Dict[str, Any]], resource: Dict[str, Any], trace_id: str) -> Dict[str, Any]:
     """用适配器注册表归一化一条 trace，返回 storage.upsert_trace 期望的扁平 dict。"""
     adapter = select_adapter(spans, resource)
-    return adapter.normalize_run(spans, resource, trace_id).to_trace_summary()
+    summary = adapter.normalize_run(spans, resource, trace_id).to_trace_summary()
+    # 采集来源由上游声明（resource 属性），平台入口可用请求头覆盖。
+    summary["ingest_source"] = str(resource.get("aios.ingest.source") or "otlp")
+    return summary
 
 
 def _is_run_trace(spans: List[Dict[str, Any]]) -> bool:

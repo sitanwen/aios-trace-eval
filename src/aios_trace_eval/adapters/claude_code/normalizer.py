@@ -26,6 +26,7 @@ class ClaudeCodeAdapter(AgentAdapter):
     capabilities = AdapterCapabilities(
         execute=True,
         process_metrics=True,
+        session_context=True,
         execution_modes=("local_cli", "remote_worker", "observe_only"),
     )
 

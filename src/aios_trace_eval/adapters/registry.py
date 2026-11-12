@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+from dataclasses import asdict
 from typing import Any, Dict, List, Optional
 
 from .base import AgentAdapter
@@ -33,6 +34,12 @@ _REGISTRY = _build_registry()
 
 def available_adapters() -> List[str]:
     return sorted(_REGISTRY.keys())
+
+
+def adapter_capabilities() -> List[Dict[str, Any]]:
+    """列出各平台的能力矩阵，供前端展示与接入选型。"""
+    return [{"name": adapter.name, **asdict(adapter.capabilities)}
+            for adapter in _REGISTRY.values()]
 
 
 def get_adapter(name: str) -> AgentAdapter:

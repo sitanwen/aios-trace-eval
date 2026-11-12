@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import asyncio
 import json
+import re
 import secrets
 import threading
 import time
@@ -19,6 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import experiment_runner
+from .adapters.registry import adapter_capabilities
 from .otlp import decode_traces, normalize_trace_summary
 from .storage import RUNTIME_METRIC_NAMES, Store
 from .metrics import catalog
@@ -482,6 +484,12 @@ def trace_by_run_id(run_id: str) -> dict:
     if result is None:
         raise HTTPException(status_code=404, detail="trace not found")
     return result
+
+
+@app.get("/api/adapters")
+def adapters() -> list:
+    """平台适配能力矩阵：观测、会话上下文、执行、工具与资源。"""
+    return adapter_capabilities()
 
 
 @app.get("/api/agents")
@@ -1121,6 +1129,15 @@ def create_experiment(body: ExperimentInput) -> dict:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+def _ingest_source(request: Request, fallback: str = "otlp") -> str:
+    """采集来源：请求头优先，允许 pilot / ebpf / proxy 等任意标记。"""
+    raw = request.headers.get("x-aios-ingest-source", "").strip().lower()
+    if not raw:
+        return fallback
+    cleaned = re.sub(r"[^a-z0-9_.-]", "", raw)[:32]
+    return cleaned or fallback
+
+
 @app.post("/v1/traces")
 async def receive_traces(request: Request) -> Response:
     payload = await request.body()
@@ -1128,10 +1145,14 @@ async def receive_traces(request: Request) -> Response:
         traces_data, spans_data, process_samples = decode_traces(
             payload, request.headers.get("content-type", "application/x-protobuf")
         )
+        # 请求头可覆盖 resource 上的 aios.ingest.source
+        header_source = _ingest_source(request, "")
         # Insert a parent trace first for the span foreign key, then rebuild the
         # aggregate from every span stored for that trace. OTLP exporters may
         # deliver one trace in several batches and may retry a batch.
         for item in traces_data:
+            if header_source:
+                item["ingest_source"] = header_source
             store.upsert_trace(item)
         store.upsert_spans(spans_data)
         for item in traces_data:
@@ -1144,9 +1165,13 @@ async def receive_traces(request: Request) -> Response:
                 resource["aios.experiment.id"] = item["experiment_id"]
             if item.get("version"):
                 resource["aios.agent.version"] = item["version"]
+            resource["aios.ingest.source"] = item.get("ingest_source") or "otlp"
             complete = store.spans_for_summary(item["trace_id"])
             if complete:
-                store.upsert_trace(normalize_trace_summary(complete, resource, item["trace_id"]))
+                summary = normalize_trace_summary(complete, resource, item["trace_id"])
+                if header_source:
+                    summary["ingest_source"] = header_source
+                store.upsert_trace(summary)
         store.upsert_metric_samples(process_samples)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"invalid OTLP trace payload: {exc}") from exc

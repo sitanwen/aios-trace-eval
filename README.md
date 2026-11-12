@@ -20,6 +20,7 @@ AIOS Trace Eval 是一个面向 OpenClaw 的 Agent 可观测与评测平台。�
 ## 能做什么
 
 - 接收并解析 OpenClaw OTLP Trace
+- 接受任意 OTLP/HTTP 上游（原生探针、Pilot、Collector、代理），可用 `X-AIOS-Ingest-Source` 标注来源
 - 统计输入、输出、缓存与总 Token
 - 记录端到端耗时、TTFT、模型调用、工具调用、工具错误与 Failover
 - 管理 Agent、评测数据集和 Case

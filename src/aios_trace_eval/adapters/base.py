@@ -24,6 +24,8 @@ class AdapterCapabilities:
     observe: bool = True
     execute: bool = False
     process_metrics: bool = False
+    session_context: bool = False
+    tool_calls: bool = True
     execution_modes: tuple[str, ...] = ("observe_only",)
 
 

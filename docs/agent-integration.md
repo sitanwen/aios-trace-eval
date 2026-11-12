@@ -6,6 +6,18 @@
 
 平台地址默认 `http://127.0.0.1:8080`（下面统一写作 `<AIOS_HOST>`，部署后换成实际地址，例如 `https://eval.example.com`）。OTLP 协议固定为 `http/protobuf`。
 
+## 0.1 任意 OTLP 上游
+
+平台不绑定某个采集器：Agent 原生探针、LoongSuite Pilot、OpenTelemetry Collector、自建代理，只要按 OTLP/HTTP + `http/protobuf` 把 trace 发到 `/v1/traces` 即可。
+
+用请求头标注来源：
+
+```bash
+X-AIOS-Ingest-Source: pilot
+```
+
+也可以把 `aios.ingest.source=pilot` 写进 OTLP resource 属性；请求头优先级更高。运行详情会显示来源，未标注时记为 `otlp`。
+
 ---
 
 ## 0. 通用：三种接入能力（务必先看）

@@ -79,6 +79,7 @@ def main() -> None:
     request = ExportTraceServiceRequest()
     rs = request.resource_spans.add()
     rs.resource.attributes.append(kv("service.name", "openclaw-eval"))
+    rs.resource.attributes.append(kv("aios.ingest.source", "resource-test"))
     ss = rs.scope_spans.add()
     trace_id = bytes.fromhex("01" * 16)
     root = ss.spans.add(
@@ -221,6 +222,7 @@ def main() -> None:
         assert metric_response.status_code == 200, metric_response.text
         traces = client.get("/api/traces").json()
         assert len(traces) == 1
+        assert traces[0]["ingest_source"] == "resource-test"
         assert traces[0]["total_tokens"] == 1000
         assert traces[0]["tool_calls"] == 1
         detail = client.get(f"/api/traces/{traces[0]['trace_id']}").json()
@@ -322,14 +324,23 @@ def main() -> None:
         ])
         hermes_response = client.post(
             "/v1/traces", content=hermes_request.SerializeToString(),
-            headers={"content-type": "application/x-protobuf"},
+            headers={
+                "content-type": "application/x-protobuf",
+                "x-aios-ingest-source": "selftest",
+            },
         )
         assert hermes_response.status_code == 200, hermes_response.text
         hermes_trace = client.get("/api/traces/by-run-id/run-hermes").json()["trace"]
+        assert hermes_trace["ingest_source"] == "selftest"
         assert hermes_trace["total_tokens"] == 180, hermes_trace
         assert hermes_trace["model"] == "test-model"
         assert hermes_trace["tool_calls"] == 1
         assert hermes_trace["tool_errors"] == 1
+
+        capabilities = {item["name"]: item for item in client.get("/api/adapters").json()}
+        assert capabilities["hermes"]["session_context"] is True
+        assert capabilities["hermes"]["execute"] is True
+        assert capabilities["openclaw"]["session_context"] is False
     print("PLATFORM SELFTEST PASSED")
 
 
