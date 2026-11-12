@@ -137,7 +137,7 @@ async function loadPage(page){try{if(page==='overview')await loadOverview();if(p
 
 async function loadOverview(){const [overview,runs]=await Promise.all([api('/api/overview'),api('/api/traces?limit=5')]);const t=overview.totals;$('#overviewStats').innerHTML=[['运行次数',t.runs],['业务成功率',t.runs?`${(t.success_rate*100).toFixed(1)}%`:'—'],['总 Token',formatNumber(t.tokens)],['P95 耗时',formatDuration(t.p95_duration)]].map(x=>`<div class="stat"><span>${x[0]}</span><b>${x[1]}</b></div>`).join('');renderRuns($('#recentRuns'),runs,'还没有运行数据','完成 Agent 接入并执行任务后，Trace 会显示在这里。')}
 
-async function loadAgents(){const [agents,adapters]=await Promise.all([api('/api/agents'),api('/api/adapters')]);state.agents=agents;state.adapters=adapters;const capabilityByName=Object.fromEntries(adapters.map(item=>[item.name,item]));const node=$('#agentList');if(!state.agents.length){node.innerHTML=empty('◇','还没有接入 Agent','选择 Agent 平台与运行方式，完成 Trace、执行和资源采集配置。','接入 Agent','agent');return}const runtimeLabels={openclaw:'OpenClaw',claude_code:'Claude Code',dsh:'DeepSeek Harness',hermes:'Hermes',generic:'通用 GenAI'},modeLabels={gateway:'Gateway',local_cli:'Local CLI',remote_worker:'Remote Worker',observe_only:'仅观测'};node.innerHTML=state.agents.map(agent=>{const runtime=agent.runtime_type||agent.protocol||'openclaw',mode=agent.execution_mode||'gateway',caps=capabilityByName[runtime]||{},observed=!!agent.last_run_at_ns,executable=['gateway','local_cli'].includes(mode),resource=mode==='local_cli'?'运行时采集':mode==='gateway'?'Gateway 指标':'未接入';return `<article class="resource-card agent-card"><div class="resource-icon agent-runtime-icon">${runtime==='openclaw'?'O':runtime==='claude_code'?'C':runtime==='dsh'?'D':runtime==='hermes'?'H':'G'}</div><div class="resource-main"><div class="agent-title"><h3>${escapeHtml(agent.name)}</h3><span class="tag">${runtimeLabels[runtime]||escapeHtml(runtime)}</span></div><p>${escapeHtml(agent.description||`${modeLabels[mode]||mode} 接入`)}</p><div class="capability-row"><span class="capability ${observed?'active':''}">Trace ${observed?'已连接':'待验证'}</span><span class="capability ${caps.session_context?'active':''}">${caps.session_context?'会话上下文':'无会话上下文'}</span><span class="capability ${caps.tool_calls?'active':''}">工具调用</span><span class="capability ${executable?'active':''}">${executable?'可执行':'仅观测'}</span><span class="capability ${mode==='local_cli'?'active':''}">资源 ${resource}</span></div></div><div class="resource-meta"><div><b>${agent.run_count}</b>运行次数</div><div><b>${agent.last_run_at_ns?nsFullTime(agent.last_run_at_ns):'—'}</b>最近运行</div><div><span class="tag">${modeLabels[mode]||escapeHtml(mode)}</span></div><div class="card-actions"><button class="button small" data-edit-agent="${agent.agent_id}">编辑</button><button class="button small danger" data-delete-agent="${agent.agent_id}">删除</button></div></div></article>`}).join('');$$('[data-edit-agent]').forEach(button=>button.onclick=event=>{event.stopPropagation();openAgentEditor(button.dataset.editAgent)});$$('[data-delete-agent]').forEach(button=>button.onclick=event=>{event.stopPropagation();const agent=state.agents.find(item=>item.agent_id===button.dataset.deleteAgent);confirmDelete(`/api/agents/${button.dataset.deleteAgent}`,`Agent「${agent?.name||''}」`,loadAgents)})}
+async function loadAgents(){const [agents,adapters]=await Promise.all([api('/api/agents'),api('/api/adapters')]);state.agents=agents;state.adapters=adapters;const capabilityByName=Object.fromEntries(adapters.map(item=>[item.name,item]));const node=$('#agentList');if(!state.agents.length){node.innerHTML=empty('◇','还没有接入 Agent','选择 Agent 平台与运行方式，完成 Trace、执行和资源采集配置。','接入 Agent','agent');return}const runtimeLabels={openclaw:'OpenClaw',claude_code:'Claude Code',dsh:'DeepSeek Harness',hermes:'Hermes',codex:'Codex CLI',generic:'通用 GenAI'},modeLabels={gateway:'Gateway',local_cli:'Local CLI',remote_worker:'Remote Worker',observe_only:'仅观测'};node.innerHTML=state.agents.map(agent=>{const runtime=agent.runtime_type||agent.protocol||'openclaw',mode=agent.execution_mode||'gateway',caps=capabilityByName[runtime]||{},observed=!!agent.last_run_at_ns,executable=['gateway','local_cli'].includes(mode),resource=mode==='local_cli'?'运行时采集':mode==='gateway'?'Gateway 指标':'未接入';return `<article class="resource-card agent-card"><div class="resource-icon agent-runtime-icon">${runtime==='openclaw'?'O':runtime==='claude_code'?'C':runtime==='dsh'?'D':runtime==='hermes'?'H':runtime==='codex'?'X':'G'}</div><div class="resource-main"><div class="agent-title"><h3>${escapeHtml(agent.name)}</h3><span class="tag">${runtimeLabels[runtime]||escapeHtml(runtime)}</span></div><p>${escapeHtml(agent.description||`${modeLabels[mode]||mode} 接入`)}</p><div class="capability-row"><span class="capability ${observed?'active':''}">Trace ${observed?'已连接':'待验证'}</span><span class="capability ${caps.session_context?'active':''}">${caps.session_context?'会话上下文':'无会话上下文'}</span><span class="capability ${caps.tool_calls?'active':''}">工具调用</span><span class="capability ${executable?'active':''}">${executable?'可执行':'仅观测'}</span><span class="capability ${mode==='local_cli'?'active':''}">资源 ${resource}</span></div></div><div class="resource-meta"><div><b>${agent.run_count}</b>运行次数</div><div><b>${agent.last_run_at_ns?nsFullTime(agent.last_run_at_ns):'—'}</b>最近运行</div><div><span class="tag">${modeLabels[mode]||escapeHtml(mode)}</span></div><div class="card-actions"><button class="button small" data-edit-agent="${agent.agent_id}">编辑</button><button class="button small danger" data-delete-agent="${agent.agent_id}">删除</button></div></div></article>`}).join('');$$('[data-edit-agent]').forEach(button=>button.onclick=event=>{event.stopPropagation();openAgentEditor(button.dataset.editAgent)});$$('[data-delete-agent]').forEach(button=>button.onclick=event=>{event.stopPropagation();const agent=state.agents.find(item=>item.agent_id===button.dataset.deleteAgent);confirmDelete(`/api/agents/${button.dataset.deleteAgent}`,`Agent「${agent?.name||''}」`,loadAgents)})}
 
 async function loadDatasets(){state.datasets=await api('/api/datasets');const node=$('#datasetList');if(!state.datasets.length){node.innerHTML=empty('▤','还没有数据集','创建一个数据集，并添加真实业务 Case、期望输出和验收断言。','创建数据集','dataset');return}node.innerHTML=state.datasets.map(dataset=>`<article class="resource-card" data-dataset="${dataset.dataset_id}"><div class="resource-icon">D</div><div class="resource-main"><h3>${escapeHtml(dataset.name)}</h3><p>${escapeHtml(dataset.description||'暂无描述')}</p></div><div class="resource-meta"><div><b>${dataset.case_count}</b>Cases</div><div><b>${formatDate(dataset.created_at)}</b>创建时间</div><div class="card-actions"><button class="button small" data-edit-dataset="${dataset.dataset_id}">编辑</button><button class="button small danger" data-delete-dataset="${dataset.dataset_id}">删除</button></div><em>›</em></div></article>`).join('');$$('[data-dataset]').forEach(card=>card.onclick=()=>openDataset(card.dataset.dataset));$$('[data-edit-dataset]').forEach(button=>button.onclick=event=>{event.stopPropagation();openDatasetEditor(button.dataset.editDataset)});$$('[data-delete-dataset]').forEach(button=>button.onclick=event=>{event.stopPropagation();const dataset=state.datasets.find(item=>item.dataset_id===button.dataset.deleteDataset);confirmDelete(`/api/datasets/${button.dataset.deleteDataset}`,`数据集「${dataset?.name||''}」`,loadDatasets)})}
 
@@ -185,9 +185,9 @@ function status(value){const map={passed:['passed','通过'],failed:['failed','�
 function empty(icon,title,desc,action,type){return `<div class="panel empty"><div class="empty-icon">${icon}</div><h3>${title}</h3><p>${desc}</p><button class="button primary" data-empty-action="${type}">${action}</button></div>`}
 
 function field(name,label,type='text',placeholder='',required=true,extra=''){if(type==='textarea')return `<div class="field"><label>${label}</label><textarea name="${name}" placeholder="${placeholder}" ${required?'required':''}></textarea></div>`;return `<div class="field"><label>${label}</label><input name="${name}" type="${type}" placeholder="${placeholder}" ${required?'required':''} ${extra}></div>`}
-function agentSnippet(protocol){const origin=location.origin;const map={hermes:`python -m pip install hermes-plugin-otel-tracing\n\nexport HERMES_OTEL_ENABLED=true\nexport HERMES_OTEL_EXPORTER=otlp\nexport OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf\nexport OTEL_EXPORTER_OTLP_ENDPOINT=${origin}\nexport OTEL_SERVICE_NAME=hermes-agent\n\nhermes chat -Q -q "<任务>"`,claude_code:`CLAUDE_CODE_ENABLE_TELEMETRY=1\nCLAUDE_CODE_ENHANCED_TELEMETRY_BETA=1\nOTEL_TRACES_EXPORTER=otlp\nOTEL_METRICS_EXPORTER=otlp\nOTEL_LOGS_EXPORTER=otlp\nOTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf\nOTEL_EXPORTER_OTLP_ENDPOINT=${origin}\nOTEL_SERVICE_NAME=claude-code\n\nclaude --print "<任务>"`,dsh:`dsh plugin --profile headless add @loongsuite/dsh-plugin\nOTEL_SERVICE_NAME=dsh-agent\nOTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf\nOTEL_EXPORTER_OTLP_ENDPOINT=${origin}\n\ndsh --profile headless "<任务>"`,openclaw:`# openclaw.json 里 diagnostics.otel.endpoint 指向：${origin}\n# 平台「评测实验」一键运行，或：\nopenclaw agent "<任务>"`,generic:`OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf\nOTEL_EXPORTER_OTLP_ENDPOINT=${origin}\n# 用 opentelemetry-instrumentation-openai 埋点产出标准 gen_ai.* span`};return map[protocol]||map.generic}
+function agentSnippet(protocol){const origin=location.origin;const map={hermes:`python -m pip install hermes-plugin-otel-tracing\n\nexport HERMES_OTEL_ENABLED=true\nexport HERMES_OTEL_EXPORTER=otlp\nexport OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf\nexport OTEL_EXPORTER_OTLP_ENDPOINT=${origin}\nexport OTEL_SERVICE_NAME=hermes-agent\n\nhermes chat -Q -q "<任务>"`,claude_code:`CLAUDE_CODE_ENABLE_TELEMETRY=1\nCLAUDE_CODE_ENHANCED_TELEMETRY_BETA=1\nOTEL_TRACES_EXPORTER=otlp\nOTEL_METRICS_EXPORTER=otlp\nOTEL_LOGS_EXPORTER=otlp\nOTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf\nOTEL_EXPORTER_OTLP_ENDPOINT=${origin}\nOTEL_SERVICE_NAME=claude-code\n\nclaude --print "<任务>"`,dsh:`dsh plugin --profile headless add @loongsuite/dsh-plugin\nOTEL_SERVICE_NAME=dsh-agent\nOTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf\nOTEL_EXPORTER_OTLP_ENDPOINT=${origin}\n\ndsh --profile headless "<任务>"`,codex:`# ~/.codex/config.toml 里 [otel] endpoint 指向完整的 /v1/traces 地址\ntrace_exporter = { otlp-http = { endpoint = "${origin}/v1/traces", protocol = "binary" } }\n\n# 平台「评测实验」一键运行，或：\ncodex exec --skip-git-repo-check "<任务>"`,openclaw:`# openclaw.json 里 diagnostics.otel.endpoint 指向：${origin}\n# 平台「评测实验」一键运行，或：\nopenclaw agent "<任务>"`,generic:`OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf\nOTEL_EXPORTER_OTLP_ENDPOINT=${origin}\n# 用 opentelemetry-instrumentation-openai 埋点产出标准 gen_ai.* span`};return map[protocol]||map.generic}
 function renderAgentSnippet(protocol){const node=$('#agentSnippet');if(node)node.textContent=agentSnippet(protocol)}
-function renderAgentSetup(runtime){const form=$('#modalForm');if(!form)return;const mode=form.elements.execution_mode;const modes={openclaw:[['gateway','Gateway'],['observe_only','仅观测']],claude_code:[['local_cli','本地 CLI（推荐）'],['observe_only','仅观测']],dsh:[['local_cli','本地 CLI（推荐）'],['observe_only','仅观测']],hermes:[['local_cli','本地 CLI（推荐）'],['observe_only','仅观测']],generic:[['observe_only','仅观测']]};mode.innerHTML=(modes[runtime]||modes.generic).map(item=>`<option value="${item[0]}">${item[1]}</option>`).join('');const option=form.querySelector('[data-agent-platform-option]'),label=option?.querySelector('label'),input=option?.querySelector('input');if(option){option.classList.toggle('hidden',!['claude_code','dsh','hermes'].includes(runtime));if(runtime==='dsh'){label.textContent='Profile（可选）';input.name='profile';input.placeholder='headless'}else if(runtime==='hermes'){label.textContent='模型（可选）';input.name='model';input.placeholder='使用 Hermes 默认模型'}else{label.textContent='模型（可选）';input.name='model';input.placeholder='使用 Claude Code 默认模型'}}renderAgentMode(mode.value);renderAgentSnippet(runtime)}
+function renderAgentSetup(runtime){const form=$('#modalForm');if(!form)return;const mode=form.elements.execution_mode;const modes={openclaw:[['gateway','Gateway'],['observe_only','仅观测']],claude_code:[['local_cli','本地 CLI（推荐）'],['observe_only','仅观测']],dsh:[['local_cli','本地 CLI（推荐）'],['observe_only','仅观测']],hermes:[['local_cli','本地 CLI（推荐）'],['observe_only','仅观测']],codex:[['local_cli','本地 CLI（推荐）'],['observe_only','仅观测']],generic:[['observe_only','仅观测']]};mode.innerHTML=(modes[runtime]||modes.generic).map(item=>`<option value="${item[0]}">${item[1]}</option>`).join('');const option=form.querySelector('[data-agent-platform-option]'),label=option?.querySelector('label'),input=option?.querySelector('input');if(option){option.classList.toggle('hidden',!['claude_code','dsh','hermes','codex'].includes(runtime));if(runtime==='dsh'){label.textContent='Profile（可选）';input.name='profile';input.placeholder='headless'}else if(runtime==='hermes'){label.textContent='模型（可选）';input.name='model';input.placeholder='使用 Hermes 默认模型'}else if(runtime==='codex'){label.textContent='Profile（可选）';input.name='profile';input.placeholder='对应 $CODEX_HOME/<name>.config.toml，可留空'}else{label.textContent='模型（可选）';input.name='model';input.placeholder='使用 Claude Code 默认模型'}}renderAgentMode(mode.value);renderAgentSnippet(runtime)}
 function renderAgentMode(mode){const form=$('#modalForm');if(!form)return;const endpoint=form.querySelector('[data-agent-endpoint]'),local=form.querySelector('[data-agent-local]');if(endpoint)endpoint.classList.toggle('hidden',!['gateway','remote_worker'].includes(mode));if(local)local.classList.toggle('hidden',mode!=='local_cli')}
 function copyAgentSnippet(){const node=$('#agentSnippet');if(!node||!node.textContent)return;if(navigator.clipboard?.writeText){navigator.clipboard.writeText(node.textContent).then(()=>toast('已复制接入配置')).catch(()=>toast('复制失败，请手动全选复制'))}else{toast('复制失败，请手动全选复制')}}
 async function confirmDelete(path,label,after){if(!confirm(`确定删除${label}？此操作不可撤销。`))return;try{await api(path,{method:'DELETE'});toast(`${label}已删除`);if(after)await after()}catch(error){toast(error.message)}}
@@ -195,7 +195,7 @@ function openAgentEditor(id){const item=state.agents.find(value=>value.agent_id=
 function openDatasetEditor(id,reopenDataset=''){const item=state.datasets.find(value=>value.dataset_id===id);if(!item)return;openModal('dataset');const form=$('#modalForm');form.dataset.datasetId=id;if(reopenDataset)form.dataset.reopenDataset=reopenDataset;$('#modalTitle').textContent='编辑数据集';$('#modalDesc').textContent='修改名称和描述不会影响已有 Case 与历史运行记录。';form.elements['name'].value=item.name||'';form.elements['description'].value=item.description||''}
 function openJudgeEditor(id){const item=state.judgeModels.find(value=>value.judge_model_id===id);if(!item)return;openModal('judge');const form=$('#modalForm');form.dataset.judgeId=id;$('#modalTitle').textContent='编辑评测模型';$('#modalDesc').textContent='API Key 留空表示保持原 Key；修改配置后需要重新测试连通性。';form.elements['name'].value=item.name||'';form.elements['provider'].value=item.provider||'custom';form.elements['base_url'].value=item.base_url||'';form.elements['model'].value=item.model||'';const key=form.elements['api_key'];key.value='';key.required=false;key.placeholder=item.has_api_key?'已保存，留空保持不变':'输入模型服务 API Key'}
 function openModal(kind){const forms={
-  agent:{title:'接入 Agent',desc:'先选择平台与运行方式，再配置这个 Agent 实例需要的连接信息。',html:field('name','Agent 名称','text','例如：客服 Agent')+field('description','描述','textarea','说明 Agent 的用途',false)+`<div class="form-grid"><div class="field"><label>Agent 平台</label><select name="runtime_type" onchange="renderAgentSetup(this.value)"><option value="openclaw">OpenClaw</option><option value="claude_code">Claude Code</option><option value="dsh">DeepSeek Harness</option><option value="hermes">Hermes</option><option value="generic">通用 GenAI</option></select></div><div class="field"><label>运行方式</label><select name="execution_mode" onchange="renderAgentMode(this.value)"></select></div></div><div class="field" data-agent-endpoint><label>连接地址</label><input name="endpoint" type="url" placeholder="Gateway 地址"></div><div data-agent-local><div class="form-grid"><div class="field"><label>可执行文件</label><input name="executable" type="text" placeholder="使用 PATH 时可留空"></div><div class="field"><label>工作目录</label><input name="working_directory" type="text" placeholder="Agent 执行任务的目录"></div></div><div class="field" data-agent-platform-option><label>模型（可选）</label><input name="model" type="text" placeholder="使用 Agent 默认模型"></div><div class="field"><label>附加参数（可选）</label><input name="extra_args" type="text" placeholder="例如：--permission-mode default"></div></div><details class="agent-setup-details"><summary>查看遥测接入配置</summary><pre id="agentSnippet" class="snippet"></pre><button type="button" class="button small" onclick="copyAgentSnippet()">复制配置</button></details>`},
+  agent:{title:'接入 Agent',desc:'先选择平台与运行方式，再配置这个 Agent 实例需要的连接信息。',html:field('name','Agent 名称','text','例如：客服 Agent')+field('description','描述','textarea','说明 Agent 的用途',false)+`<div class="form-grid"><div class="field"><label>Agent 平台</label><select name="runtime_type" onchange="renderAgentSetup(this.value)"><option value="openclaw">OpenClaw</option><option value="claude_code">Claude Code</option><option value="dsh">DeepSeek Harness</option><option value="hermes">Hermes</option><option value="codex">Codex CLI</option><option value="generic">通用 GenAI</option></select></div><div class="field"><label>运行方式</label><select name="execution_mode" onchange="renderAgentMode(this.value)"></select></div></div><div class="field" data-agent-endpoint><label>连接地址</label><input name="endpoint" type="url" placeholder="Gateway 地址"></div><div data-agent-local><div class="form-grid"><div class="field"><label>可执行文件</label><input name="executable" type="text" placeholder="使用 PATH 时可留空"></div><div class="field"><label>工作目录</label><input name="working_directory" type="text" placeholder="Agent 执行任务的目录"></div></div><div class="field" data-agent-platform-option><label>模型（可选）</label><input name="model" type="text" placeholder="使用 Agent 默认模型"></div><div class="field"><label>附加参数（可选）</label><input name="extra_args" type="text" placeholder="例如：--permission-mode default"></div></div><details class="agent-setup-details"><summary>查看遥测接入配置</summary><pre id="agentSnippet" class="snippet"></pre><button type="button" class="button small" onclick="copyAgentSnippet()">复制配置</button></details>`},
   dataset:{title:'创建数据集',desc:'数据集创建后，可以继续添加 Case 和断言。',html:field('name','数据集名称','text','例如：客服核心场景')+field('description','描述','textarea','说明该数据集覆盖的业务范围',false)},
   judge:{title:'添加评测模型',desc:'用于 LLM-as-a-Judge。API Key 仅发送到本机服务端，页面不会回显。',html:field('name','配置名称','text','例如：DeepSeek Judge')+`<div class="field"><label>模型服务</label><select name="provider" required><option value="deepseek">DeepSeek</option><option value="openai">OpenAI 兼容</option><option value="custom">自定义服务</option></select></div>`+field('base_url','API Base URL','url','https://api.deepseek.com',true,'value="https://api.deepseek.com"')+field('model','模型名称','text','例如：deepseek-chat',true,'value="deepseek-chat"')+field('api_key','API Key','password','输入模型服务 API Key',true,'autocomplete="new-password"')},
   evaluator:{title:'创建评测指标',desc:'定义这个指标检查什么、如何计算，以及多少分算通过。',html:field('name','指标名称','text','例如：数值答案一致性')+field('description','指标说明','textarea','用一句话说明检查目标和适用场景',false)+`<div class="form-grid"><div class="field"><label>执行方式</label><select name="evaluator_type" required><option value="llm">LLM Judge</option><option value="rule">规则</option><option value="trajectory_rule">轨迹规则</option><option value="code">Code（受限表达式）</option><option value="human">人工</option></select></div><div class="field"><label>指标维度</label><select name="dimension" required><option value="result">结果</option><option value="process">过程</option><option value="efficiency">效率</option><option value="risk">风险</option></select></div></div>`+`<div class="form-grid form-grid-three">${field('score_min','最低分','number','0',true,'value="0" step="0.1"')}${field('score_max','最高分','number','1',true,'value="1" step="0.1"')}${field('pass_threshold','通过阈值','number','0.8',true,'value="0.8" step="0.1"')}</div>`+selectField('judge_model_id','Judge 模型',state.judgeModels,'judge_model_id','name',false)+field('prompt_template','评分标准 / Prompt','textarea','LLM 可引用 {{query}}、{{reference}}、{{response}}、{{trajectory}}',false)+field('code_expression','Code 表达式','textarea','例如：normalize_number(response) == normalize_number(reference)',false)+`<div class="form-grid form-grid-three">${field('config_field','Trace 字段','text','如 total_tokens',false)}${field('config_operator','比较方式','text','lt / le / eq / ge / gt',false)}${field('config_value','比较值','number','如 10000',false,'step="0.1"')}</div>`+field('config_json','高级配置（JSON）','textarea','例如：{"gate": true}',false)},
@@ -289,6 +289,11 @@ function guidePlatformList(origin){
       key:'openclaw',name:'OpenClaw',icon:'O',tagline:'Gateway 长驻',
       summary:'通过 diagnostics-otel 插件上报 Trace 与指标。平台既可以直接观测 Gateway，也可以在「评测实验」里一键运行，并按 Gateway 进程采集 CPU / RSS。',
       tags:['Trace 观测','评测评分','一键跑实验','Gateway 进程资源'],
+      requirements:[
+        ['Agent 运行时','OpenClaw 2026.8.x','本项目完整验证版本为 2026.8.2'],
+        ['遥测组件','diagnostics-otel','与 OpenClaw 使用相同版本'],
+        ['运行条件','模型已配置','先能独立完成一次模型请求']
+      ],
       steps:[
         {
           title:'配置 OTLP 上报',
@@ -327,12 +332,22 @@ function guidePlatformList(origin){
         '「运行记录」出现 service.name 为所配 serviceName 的 Trace，且 total_tokens > 0。',
         '只有健康检查、没有模型 Span 的 Trace 不能当作评测样本。',
         '资源曲线反映共享 Gateway 进程，不是单次请求独占内存。'
+      ],
+      troubleshoot:[
+        '没有 Trace：检查 OpenClaw 日志确认 diagnostics-otel 已加载、没有导出错误。',
+        'Trace 有但 Token 为 0：确认任务真正进入模型请求，健康检查不算评测样本。',
+        '插件或版本不一致：OpenClaw 与 diagnostics-otel 使用相同版本，不同版本不要共用 state 目录。'
       ]
     },
     {
       key:'dsh',name:'DeepSeek Harness',icon:'D',tagline:'Local CLI 推荐',
       summary:'通过 @loongsuite/dsh-plugin 在进程内导出 OTLP。平台推荐用「本地 CLI」方式启动 dsh，逐个执行 Case，并采集整个进程树的 CPU / RSS。',
       tags:['Trace 观测','评测评分','一键跑实验','进程树资源'],
+      requirements:[
+        ['Agent 运行时','DeepSeek Harness CLI','终端中必须能执行 dsh'],
+        ['遥测组件','@loongsuite/dsh-plugin','安装到实际运行任务的 Profile'],
+        ['运行条件','模型凭证已配置','先能独立完成一次模型任务']
+      ],
       steps:[
         {
           title:'安装 DSH 采集插件',
@@ -363,12 +378,22 @@ Profile：headless
         '「运行记录」出现 service.name=dsh-agent 的 Trace，且 total_tokens > 0。',
         'DSH 的 Token 口径是 input + output；cache_read 已包含在 input 内，不重复累加。',
         '本地 CLI 运行结束后，运行详情里能看到进程树 RSS / CPU 曲线。'
+      ],
+      troubleshoot:[
+        '找不到 dsh：平台服务的 PATH 可能与交互终端不同，填写可执行文件绝对路径。',
+        '有输出没有 Trace：确认插件安装在同一个 Profile，环境变量对 dsh 子进程可见。',
+        '模型鉴权失败：先在相同用户与 Profile 下独立运行 dsh，确认凭证可用。'
       ]
     },
     {
       key:'claude_code',name:'Claude Code',icon:'C',tagline:'Local CLI 推荐',
       summary:'Claude Code 内置 OTel 遥测，按 Anthropic 口径上报 token。平台推荐用「本地 CLI」方式执行 claude --print，并采集进程树资源。',
       tags:['Trace 观测','评测评分','一键跑实验','进程树资源'],
+      requirements:[
+        ['Agent 运行时','Claude Code','终端中必须能执行 claude'],
+        ['遥测组件','内置 OTel','无需额外安装采集插件'],
+        ['运行条件','已完成模型登录','claude --print 必须能独立返回答案']
+      ],
       steps:[
         {
           title:'开启 Claude Code 遥测',
@@ -400,12 +425,22 @@ export OTEL_SERVICE_NAME=claude-code`
         '「运行记录」出现 service.name=claude-code 的 Trace，且 total_tokens > 0。',
         'Claude Code 的 Token 口径是 input + output + cache_read + cache_write。',
         '默认不采集原文；需要按轨迹内容评分时，在受控环境开启内容采集变量。'
+      ],
+      troubleshoot:[
+        '找不到 claude：填写可执行文件绝对路径，或把 Claude Code 加入平台服务的 PATH。',
+        'CLI 能运行但没有 Trace：确认两个遥测开关均为 1，并从设置变量的同一环境启动平台。',
+        '轨迹没有输入输出原文：这是默认隐私行为；Token 和耗时仍可评测，原文采集需单独开启。'
       ]
     },
     {
       key:'hermes',name:'Hermes',icon:'H',tagline:'Local CLI 推荐',
       summary:'Nous Research 的终端 Agent。通过 hermes-plugin-otel-tracing 把会话、轮次、模型调用和工具调用导出为 OTLP Span；平台推荐用「本地 CLI」方式逐个执行 Case 并采集进程树资源。',
       tags:['Trace 观测','评测评分','一键跑实验','进程树资源'],
+      requirements:[
+        ['Agent 运行时','Hermes（Nous Research）','终端中必须能执行 hermes'],
+        ['遥测组件','hermes-plugin-otel-tracing','安装到 Hermes 实际使用的 Python 环境'],
+        ['运行条件','模型凭证已配置','hermes chat -Q -q 必须能独立返回答案']
+      ],
       steps:[
         {
           title:'安装 OTel 采集插件',
@@ -438,12 +473,65 @@ hermes chat -Q -q "<任务>"`
         '「运行记录」出现 service.name=hermes-agent 的 Trace，且 total_tokens > 0。',
         'Token 口径：input 是不含缓存的输入，total = input + output + cache_read + cache_write；reasoning 已包含在 output 中。',
         '工具调用来自 hermes.tool.* Span；工具结果 JSON 含 error 时计为工具错误。'
+      ],
+      troubleshoot:[
+        '找不到 hermes：填写可执行文件绝对路径，或把 Hermes 加入平台服务的 PATH。',
+        '有输出没有 Trace：确认插件安装在 Hermes 实际使用的 Python 环境，并重启 Hermes。',
+        'Token 为 0：确认任务真实进入模型请求，且插件版本与 Hermes 版本兼容。'
+      ]
+    },
+    {
+      key:'codex',name:'Codex CLI',icon:'X',tagline:'Local CLI 推荐',
+      summary:'Codex 0.160+ 内置 OTel 导出，在 config.toml 的 [otel] 中配置即可上报。平台以 codex exec 执行数据集 Case：原生 Trace 提供调用链路，token 用量由 Runner 从执行结果补全，并采集整个进程树的 CPU / RSS。',
+      tags:['Trace 观测','评测评分','一键跑实验','进程树资源'],
+      requirements:[
+        ['Agent 运行时','Codex CLI 0.160+','终端中必须能执行 codex exec'],
+        ['遥测组件','内置 [otel]','无需额外安装采集插件'],
+        ['运行条件','已完成模型登录','codex exec 必须能独立返回答案']
+      ],
+      steps:[
+        {
+          title:'配置原生 OTel 导出',
+          desc:'在 ~/.codex/config.toml 增加 [otel] 表。endpoint 要写完整的 /v1/traces 地址；protocol = "binary" 即 http/protobuf。也可以不改全局配置，用 -c 在单次运行时注入同样的值。',
+          code:`# ~/.codex/config.toml
+[otel]
+trace_exporter = { otlp-http = { endpoint = "${origin}/v1/traces", protocol = "binary" } }`
+        },
+        {
+          title:'以非交互方式运行一次',
+          desc:'exec 是平台批量评测使用的非交互入口；--skip-git-repo-check 允许在任意目录运行。Windows 下经过 .cmd 包装启动时，注入值建议使用 TOML 单引号字面量。',
+          code:`codex exec --skip-git-repo-check -c "otel.trace_exporter={otlp-http={endpoint='${origin}/v1/traces',protocol='binary'}}" "只回答：OTLP_OK"`
+        },
+        {
+          title:'在平台登记 Agent',
+          desc:'打开「Agent」页 → 平台选 Codex CLI，运行方式选「本地 CLI」。可执行文件留空时使用 PATH 中的 codex；Profile 对应 $CODEX_HOME/<name>.config.toml，可以留空。',
+          code:`Agent 平台：Codex CLI
+运行方式：本地 CLI（推荐）
+可执行文件：codex（留空时使用 PATH）
+Profile：可选（对应 <name>.config.toml）
+工作目录：任务所在目录`
+        }
+      ],
+      verify:[
+        '「运行记录」出现 service.name=codex_exec 的 Trace，根 Span 为 run_turn，并包含模型请求 Span。',
+        'Local CLI 一键运行的 token 来自 codex exec 执行结果：口径为 input + output，cached_input 是 input 的子集。',
+        '仅观测模式暂不采集 token：原生 Trace 不含 usage，页面显示未采集。'
+      ],
+      troubleshoot:[
+        '找不到 codex：平台服务的 PATH 可能与交互终端不同，填写可执行文件绝对路径。',
+        '有输出但没有 Trace：确认注入的 endpoint 是完整 /v1/traces 地址，且平台服务可访问。',
+        'Windows 包装脚本丢引号：填写 codex.exe 绝对路径，配置值使用 TOML 单引号字面量。'
       ]
     },
     {
       key:'generic',name:'更多平台',icon:'+',tagline:'通用 GenAI',
       summary:'任何输出标准 gen_ai.* Span 的运行时都可以先按通用方式接入；专用适配器会在接收端自动识别，这个页面也会同步补充。',
       tags:['Trace 观测','评测评分','仅观测'],
+      requirements:[
+        ['应用埋点','OpenTelemetry SDK','应用必须真实产出 gen_ai.* Span'],
+        ['导出协议','OTLP/HTTP protobuf','接收路径为 /v1/traces'],
+        ['运行方式','仅观测','平台不会主动执行未知框架的 Agent']
+      ],
       steps:[
         {
           title:'设置 OTLP 环境变量',
@@ -470,6 +558,11 @@ X-AIOS-Ingest-Source: pilot`
       verify:[
         '「运行记录」能按 gen_ai.* 字段识别 model / provider 并显示 Token。',
         '新增专用平台后，适配器会自动识别；页面会补上对应的接入步骤。'
+      ],
+      troubleshoot:[
+        '完全没有 Trace：先确认 SDK 已注册 exporter，并检查应用进程能访问平台地址。',
+        '有 Span 但识别不到模型：检查是否上报 gen_ai.operation.name、gen_ai.request.model 和 gen_ai.usage.*。',
+        '通用接入只负责观测；需要平台一键运行时应新增专用 Adapter。'
       ]
     }
   ];
@@ -479,27 +572,45 @@ function renderGuide(){
   const origin=location.origin.replace(/\/$/,'');
   const platforms=guidePlatformList(origin);
   const current=platforms.find(item=>item.key===guidePlatform)||platforms[0];
+  const traceEndpoint=current.key==='codex'?`${origin}/v1/traces`:origin;
+  const tracePathNote=current.key==='codex'?'Codex 的 [otel] 配置需要填写完整的 /v1/traces 地址':'由 SDK 自动追加，无需填写 /v1/traces';
   $('#guideContent').innerHTML=`
-    <div class="notice-card guide-intro">
-      <div>
-        <b>接入 = 让 Agent 把 OTLP Trace 报到 <code>${escapeHtml(origin)}</code></b>
-        <p>所有平台统一使用 OTLP/HTTP + http/protobuf，接收地址不要带 <code>/v1/traces</code>。支持任意 OTLP 上游（Agent 原生探针、Pilot、Collector、代理），可用 <code>X-AIOS-Ingest-Source</code> 请求头标注来源。只做观测时完成第 1 步即可；要一键跑实验，再到「Agent」页登记执行方式。</p>
-      </div>
-      <div class="guide-flow"><span>1 配置上报</span><em>→</em><span>2 登记 Agent</span><em>→</em><span>3 创建实验</span></div>
-    </div>
-    <div class="guide-tabs">${platforms.map(item=>`<button type="button" class="guide-tab ${item.key===current.key?'active':''}" data-guide-tab="${item.key}"><i>${escapeHtml(item.icon)}</i>${escapeHtml(item.name)}</button>`).join('')}</div>
-    <article class="guide-card">
-      <header class="guide-card-head">
-        <div class="resource-icon">${escapeHtml(current.icon)}</div>
-        <div class="guide-card-title"><div class="agent-title"><h3>${escapeHtml(current.name)}</h3><span class="tag">${escapeHtml(current.tagline)}</span></div><p>${escapeHtml(current.summary)}</p></div>
-        <div class="guide-tags">${current.tags.map(tag=>`<span class="capability active">${escapeHtml(tag)}</span>`).join('')}</div>
-      </header>
-      <div class="guide-steps">${current.steps.map((step,index)=>`<section class="guide-step"><div class="guide-step-head"><span>${index+1}</span><h4>${escapeHtml(step.title)}</h4></div><p>${escapeHtml(step.desc)}</p>${step.code?`<div class="guide-code"><button type="button" class="button small guide-copy">复制</button><pre class="snippet">${escapeHtml(step.code)}</pre></div>`:''}</section>`).join('')}</div>
-      <div class="guide-verify"><b>接入验证</b><ul>${current.verify.map(item=>`<li>${escapeHtml(item)}</li>`).join('')}</ul></div>
-    </article>`;
+    <div class="guide-shell">
+      <aside class="guide-nav" aria-label="Agent 接入目录">
+        <div class="guide-nav-title">Agent 接入</div>
+        ${platforms.map(item=>`<button type="button" class="guide-tab ${item.key===current.key?'active':''}" data-guide-tab="${item.key}"><i>${escapeHtml(item.icon)}</i><span>${escapeHtml(item.name)}<small>${escapeHtml(item.tagline)}</small></span></button>`).join('')}
+        <div class="guide-nav-foot"><span>OTLP Endpoint</span><code>${escapeHtml(traceEndpoint)}</code></div>
+      </aside>
+      <article class="guide-document">
+        <header class="guide-hero">
+          <div class="guide-breadcrumb">接入手册 <span>/</span> ${escapeHtml(current.name)}</div>
+          <h2>${escapeHtml(current.name)} 接入指南</h2>
+          <p>${escapeHtml(current.summary)}</p>
+          <div class="guide-tags">${current.tags.map(tag=>`<span>${escapeHtml(tag)}</span>`).join('')}</div>
+        </header>
+        <section class="guide-overview" id="guide-overview">
+          <div class="guide-section-label">接入概览</div>
+          <h3>开始之前，请确认这些条件</h3>
+          <p>先让 Agent 本身能正常完成一次模型请求，再配置遥测；否则“没有 Trace”和“模型没有运行”无法区分。支持任意 OTLP 上游（Agent 原生探针、Pilot、Collector、代理），可用 X-AIOS-Ingest-Source 请求头标注来源。</p>
+          <div class="guide-requirements">${(current.requirements||[]).map(([name,value,note])=>`<div><span class="guide-requirement-check">✓</span><div><b>${escapeHtml(name)}</b><strong>${escapeHtml(value)}</strong><small>${escapeHtml(note)}</small></div></div>`).join('')}</div>
+          <dl><div><dt>协议</dt><dd>OTLP/HTTP · http/protobuf</dd></div><div><dt>接收地址</dt><dd><code>${escapeHtml(traceEndpoint)}</code></dd></div><div><dt>Trace 路径</dt><dd>${escapeHtml(tracePathNote)}</dd></div></dl>
+        </section>
+        <div class="guide-steps">${current.steps.map((step,index)=>`<section class="guide-step" id="guide-step-${index+1}"><div class="guide-step-kicker">步骤 ${String(index+1).padStart(2,'0')}</div><h3>${escapeHtml(step.title)}</h3><p>${escapeHtml(step.desc)}</p>${step.code?`<div class="guide-code"><div class="guide-code-bar"><span>配置示例</span><button type="button" class="guide-copy">复制代码</button></div><pre class="snippet">${escapeHtml(step.code)}</pre></div>`:''}</section>`).join('')}</div>
+        <section class="guide-verify" id="guide-verify"><div><span>✓</span></div><div><h3>验证接入</h3><p>完成以上步骤后，按下面的结果确认采集链路真实可用。</p><ul>${current.verify.map(item=>`<li>${escapeHtml(item)}</li>`).join('')}</ul></div></section>
+        <section class="guide-troubleshoot" id="guide-troubleshoot"><div class="guide-section-label">Troubleshooting</div><h3>接入失败时按顺序检查</h3><ol>${(current.troubleshoot||[]).map(item=>`<li>${escapeHtml(item)}</li>`).join('')}</ol><p>页面顶部的「OTLP 检测」只证明平台接收链路可用；只有运行记录中出现本 Agent 的真实模型 Trace，才表示接入完成。</p></section>
+      </article>
+      <aside class="guide-toc" aria-label="本页目录">
+        <b>本页目录</b>
+        <a href="#guide-overview" data-guide-anchor="guide-overview">开始之前</a>
+        ${current.steps.map((step,index)=>`<a href="#guide-step-${index+1}" data-guide-anchor="guide-step-${index+1}">${escapeHtml(step.title)}</a>`).join('')}
+        <a href="#guide-verify" data-guide-anchor="guide-verify">验证接入</a>
+        <a href="#guide-troubleshoot" data-guide-anchor="guide-troubleshoot">故障排查</a>
+      </aside>
+    </div>`;
   $$('[data-guide-tab]').forEach(button=>button.onclick=()=>{guidePlatform=button.dataset.guideTab;renderGuide()});
+  $$('[data-guide-anchor]').forEach(link=>link.onclick=event=>{event.preventDefault();document.getElementById(link.dataset.guideAnchor)?.scrollIntoView({behavior:'smooth',block:'start'})});
   $$('.guide-copy').forEach(button=>button.onclick=()=>{
-    const text=button.parentElement.querySelector('pre')?.textContent||'';
+    const text=button.closest('.guide-code')?.querySelector('pre')?.textContent||'';
     if(navigator.clipboard?.writeText){navigator.clipboard.writeText(text).then(()=>toast('已复制接入配置')).catch(()=>toast('复制失败，请手动复制'))}else{toast('复制失败，请手动复制')}
   });
 }

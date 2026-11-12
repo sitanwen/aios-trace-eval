@@ -2077,77 +2077,63 @@ textarea {
 .detail-grid-four {
   grid-template-columns: repeat(4, 1fr);
 }
-/* 接入手册 */
-.guide-intro {
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 24px;
+/* 接入手册：平台目录 / 正文 / 本页目录 */
+.guide-shell {
+  display: grid;
+  grid-template-columns: 210px minmax(0, 760px) 150px;
+  justify-content: center;
+  gap: 38px;
+  align-items: start;
+  max-width: 1220px;
+  margin: 0 auto;
 }
-.guide-intro b {
-  font-size: 14px;
+.guide-nav,
+.guide-toc {
+  position: sticky;
+  top: 24px;
 }
-.guide-intro code {
-  padding: 1px 6px;
-  border-radius: 4px;
-  background: var(--primary-soft);
-  color: var(--primary);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 12px;
+.guide-nav {
+  padding-right: 18px;
+  border-right: 1px solid var(--border);
 }
-.guide-flow {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-  flex: none;
-}
-.guide-flow span {
-  padding: 5px 10px;
-  border-radius: 999px;
-  background: var(--primary-soft);
-  color: var(--primary);
-  font-size: 12px;
-  font-weight: 600;
-  white-space: nowrap;
-}
-.guide-flow em {
+.guide-nav-title {
+  margin: 3px 10px 12px;
   color: var(--subtle);
-  font-style: normal;
-}
-.guide-tabs {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin: 4px 0 14px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
 }
 .guide-tab {
+  width: 100%;
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 7px 14px 7px 8px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: var(--surface);
+  gap: 10px;
+  padding: 9px 10px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
   color: var(--muted);
-  font-size: 13px;
-  font-weight: 600;
+  font: inherit;
+  text-align: left;
   cursor: pointer;
 }
 .guide-tab:hover {
-  border-color: var(--border-strong);
+  background: #f6f8fa;
   color: var(--text);
 }
 .guide-tab.active {
-  background: var(--primary);
-  border-color: var(--primary);
-  color: #fff;
-}
-.guide-tab i {
-  width: 22px;
-  height: 22px;
-  border-radius: 6px;
   background: var(--primary-soft);
   color: var(--primary);
+}
+.guide-tab i {
+  width: 28px;
+  height: 28px;
+  flex: none;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--muted);
   display: grid;
   place-items: center;
   font-size: 12px;
@@ -2155,123 +2141,333 @@ textarea {
   font-weight: 700;
 }
 .guide-tab.active i {
-  background: rgba(255, 255, 255, 0.22);
-  color: #fff;
+  border-color: #c9d8ff;
+  color: var(--primary);
 }
-.guide-card {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 20px 22px;
+.guide-tab > span {
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 600;
 }
-.guide-card-head {
-  display: flex;
-  align-items: flex-start;
-  gap: 14px;
-  padding-bottom: 14px;
+.guide-tab small {
+  display: block;
+  margin-top: 2px;
+  color: var(--subtle);
+  font-size: 10.5px;
+  font-weight: 400;
+}
+.guide-nav-foot {
+  margin: 20px 10px 0;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+.guide-nav-foot span {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--subtle);
+  font-size: 10.5px;
+}
+.guide-nav-foot code {
+  display: block;
+  overflow: hidden;
+  color: var(--muted);
+  font: 10px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.guide-document {
+  min-width: 0;
+  padding-bottom: 50px;
+}
+.guide-hero {
+  padding: 2px 0 28px;
   border-bottom: 1px solid var(--border);
 }
-.guide-card-head .resource-icon {
-  flex: none;
+.guide-breadcrumb {
+  margin-bottom: 20px;
+  color: var(--subtle);
+  font-size: 12px;
 }
-.guide-card-title {
-  flex: 1;
-  min-width: 220px;
+.guide-breadcrumb span {
+  padding: 0 7px;
+  color: var(--border-strong);
 }
-.guide-card-title h3 {
+.guide-hero h2 {
   margin: 0;
-  font-size: 16px;
+  color: #172033;
+  font-size: 30px;
+  letter-spacing: -.025em;
 }
-.guide-card-title p {
-  margin: 6px 0 0;
+.guide-hero > p {
+  max-width: 680px;
+  margin: 12px 0 0;
   color: var(--muted);
-  font-size: 13px;
-  line-height: 1.65;
+  font-size: 14px;
+  line-height: 1.8;
 }
 .guide-tags {
   display: flex;
   flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 6px;
-  max-width: 40%;
+  gap: 7px;
+  margin-top: 17px;
 }
+.guide-tags span {
+  padding: 4px 9px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: #526078;
+  font-size: 11px;
+  background: #fafbfc;
+}
+.guide-overview,
 .guide-step {
-  padding: 16px 0;
-  border-bottom: 1px dashed var(--border);
+  scroll-margin-top: 24px;
+  padding: 32px 0;
+  border-bottom: 1px solid var(--border);
 }
-.guide-step:last-child {
-  border-bottom: 0;
-  padding-bottom: 4px;
+.guide-overview h3,
+.guide-step h3,
+.guide-verify h3,
+.guide-troubleshoot h3 {
+  margin: 0;
+  color: #20293a;
+  font-size: 19px;
+  letter-spacing: -.01em;
 }
-.guide-step-head {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 6px;
+.guide-overview > p,
+.guide-step > p,
+.guide-verify p,
+.guide-troubleshoot > p {
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 13.5px;
+  line-height: 1.8;
 }
-.guide-step-head span {
-  width: 22px;
-  height: 22px;
-  flex: none;
-  border-radius: 50%;
-  background: var(--primary-soft);
+.guide-section-label {
+  margin-bottom: 7px;
   color: var(--primary);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+.guide-requirements {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 20px;
+}
+.guide-requirements > div {
+  display: flex;
+  gap: 9px;
+  min-width: 0;
+  padding: 13px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fbfcfd;
+}
+.guide-requirement-check {
+  width: 19px;
+  height: 19px;
+  flex: none;
   display: grid;
   place-items: center;
+  border-radius: 50%;
+  background: #e5f4eb;
+  color: #19764b;
+  font-size: 10px;
+  font-weight: 800;
+}
+.guide-requirements b,
+.guide-requirements strong,
+.guide-requirements small {
+  display: block;
+}
+.guide-requirements b {
+  color: var(--subtle);
+  font-size: 10px;
+  font-weight: 500;
+}
+.guide-requirements strong {
+  margin-top: 3px;
+  color: var(--text);
   font-size: 12px;
-  font-weight: 700;
+  line-height: 1.35;
 }
-.guide-step-head h4 {
+.guide-requirements small {
+  margin-top: 4px;
+  color: var(--subtle);
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+.guide-overview dl {
+  margin: 20px 0 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.guide-overview dl > div {
+  display: grid;
+  grid-template-columns: 145px minmax(0, 1fr);
+  border-top: 1px solid var(--border);
+}
+.guide-overview dl > div:first-child { border-top: 0; }
+.guide-overview dt,
+.guide-overview dd {
   margin: 0;
-  font-size: 14px;
+  padding: 11px 14px;
+  font-size: 12.5px;
 }
-.guide-step > p {
-  margin: 0 0 10px;
+.guide-overview dt {
+  background: #f8fafc;
   color: var(--muted);
-  font-size: 13px;
-  line-height: 1.65;
+  font-weight: 600;
+}
+.guide-overview dd { color: var(--text); }
+.guide-overview code {
+  color: #344563;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.guide-step {
+  position: relative;
+}
+.guide-step-kicker {
+  margin-bottom: 7px;
+  color: var(--primary);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
 }
 .guide-code {
   position: relative;
+  margin-top: 17px;
+  overflow: hidden;
+  border: 1px solid #dfe4eb;
+  border-radius: 8px;
+  background: #f7f8fa;
+}
+.guide-code-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 36px;
+  padding: 0 10px 0 14px;
+  border-bottom: 1px solid #dfe4eb;
+  color: var(--subtle);
+  font-size: 10.5px;
 }
 .guide-code .snippet {
   margin: 0;
-  padding-right: 78px;
+  padding: 17px 18px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
   max-height: none;
+  color: #344054;
+  font-size: 11.5px;
+  line-height: 1.75;
 }
 .guide-copy {
-  position: absolute;
-  top: 8px;
-  right: 8px;
+  padding: 3px 7px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  cursor: pointer;
+}
+.guide-copy:hover {
+  background: #e9edf2;
+  color: var(--text);
 }
 .guide-verify {
-  margin-top: 16px;
-  padding: 12px 14px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: #f8fafc;
+  scroll-margin-top: 24px;
+  display: grid;
+  grid-template-columns: 34px 1fr;
+  gap: 12px;
+  margin-top: 32px;
+  padding: 20px;
+  border: 1px solid #cfe4d9;
+  border-radius: 8px;
+  background: #f7fbf9;
 }
-.guide-verify b {
-  font-size: 13px;
+.guide-verify > div:first-child span {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: #dff3e8;
+  color: #19764b;
+  font-weight: 700;
 }
 .guide-verify ul {
-  margin: 6px 0 0;
-  padding-left: 18px;
+  margin: 11px 0 0;
+  padding-left: 17px;
   color: var(--muted);
   font-size: 12.5px;
-  line-height: 1.7;
+  line-height: 1.8;
+}
+.guide-toc {
+  padding-left: 16px;
+  border-left: 1px solid var(--border);
+}
+.guide-toc b {
+  display: block;
+  margin-bottom: 9px;
+  color: var(--text);
+  font-size: 11.5px;
+}
+.guide-toc a {
+  display: block;
+  padding: 5px 0;
+  color: var(--subtle);
+  font-size: 11px;
+  line-height: 1.45;
+  text-decoration: none;
+}
+.guide-toc a:hover {
+  color: var(--primary);
+}
+.guide-troubleshoot {
+  scroll-margin-top: 24px;
+  padding: 32px 0 8px;
+}
+.guide-troubleshoot ol {
+  margin: 17px 0 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: guide-trouble;
+}
+.guide-troubleshoot li {
+  position: relative;
+  counter-increment: guide-trouble;
+  padding: 11px 12px 11px 42px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.65;
+}
+.guide-troubleshoot li::before {
+  content: counter(guide-trouble);
+  position: absolute;
+  left: 10px;
+  top: 12px;
+  width: 19px;
+  height: 19px;
+  display: grid;
+  place-items: center;
+  border-radius: 5px;
+  background: #f0f3f7;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
 }
 @media (max-width: 900px) {
-  .guide-intro {
-    flex-direction: column;
-  }
-  .guide-card-head {
-    flex-wrap: wrap;
-  }
-  .guide-tags {
-    max-width: none;
-    justify-content: flex-start;
-  }
+  .guide-shell { grid-template-columns: 170px minmax(0, 1fr); gap: 24px; }
+  .guide-toc { display: none; }
+  .guide-requirements { grid-template-columns: 1fr; }
   .dimension-grid,
   .detail-grid-four,
   .evaluator-grid {

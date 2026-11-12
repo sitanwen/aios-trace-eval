@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
-from typing import Any, Dict, Iterable, List, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from .adapters.registry import select_adapter
 
@@ -35,7 +35,9 @@ def _attrs(values: Iterable[Any]) -> Dict[str, Any]:
     return {item.key: _any_value(item.value) for item in values}
 
 
-def decode_traces(payload: bytes, content_type: str) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+def decode_traces(payload: bytes, content_type: str,
+                  trace_exists: Optional[Callable[[str], bool]] = None
+                  ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
     try:
         from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
         from google.protobuf.json_format import Parse
@@ -110,7 +112,11 @@ def decode_traces(payload: bytes, content_type: str) -> Tuple[List[Dict[str, Any
     for trace_id, spans in grouped.items():
         resource = resources.get(trace_id, {})
         adapter = select_adapter(spans, resource)
-        if not adapter.is_run_trace(spans):
+        # 一条 trace 可能分多个 OTLP 批次到达；首个批次通过 is_run_trace 后，
+        # 后续批次可能不含判定特征 span（如 codex 的 run_turn 只在首批），
+        # 已入库的 trace 必须继续接收，否则会丢 span。
+        known = trace_exists is not None and trace_exists(trace_id)
+        if not adapter.is_run_trace(spans) and not known:
             continue
         run_trace_ids.add(trace_id)
         traces.append(normalize_trace_summary(spans, resource, trace_id))

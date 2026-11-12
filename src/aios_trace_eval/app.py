@@ -148,6 +148,14 @@ class ResourceSamplesInput(BaseModel):
     samples: list[dict]
 
 
+class TraceUsageInput(BaseModel):
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    reasoning_tokens: int = 0
+
+
 @app.get("/api/health")
 def health() -> dict:
     return {"status": "ok", "storage": "sqlite", "otlp": True}
@@ -490,6 +498,27 @@ def trace_by_run_id(run_id: str) -> dict:
 def adapters() -> list:
     """平台适配能力矩阵：观测、会话上下文、执行、工具与资源。"""
     return adapter_capabilities()
+
+
+@app.patch("/api/traces/{trace_id}/usage")
+def update_trace_usage(trace_id: str, body: TraceUsageInput) -> dict:
+    """Runner 用 CLI 执行结果补写 token 用量。
+
+    部分平台（codex）的原生 trace 不含 usage，Local CLI 模式下由 Runner 从
+    执行输出解析后回填；token 字段以本次请求为准整体覆盖。
+    """
+    usage = {
+        "input_tokens": body.input_tokens,
+        "output_tokens": body.output_tokens,
+        "cache_read_tokens": body.cache_read_tokens,
+        "cache_write_tokens": body.cache_write_tokens,
+        "reasoning_tokens": body.reasoning_tokens,
+        # 口径与 DSH 一致：cached 是 input 子集，total = input + output。
+        "total_tokens": body.input_tokens + body.output_tokens,
+    }
+    if not store.update_trace_usage(trace_id, usage):
+        raise HTTPException(status_code=404, detail="trace not found")
+    return {"trace_id": trace_id, **usage}
 
 
 @app.get("/api/agents")
@@ -1143,7 +1172,8 @@ async def receive_traces(request: Request) -> Response:
     payload = await request.body()
     try:
         traces_data, spans_data, process_samples = decode_traces(
-            payload, request.headers.get("content-type", "application/x-protobuf")
+            payload, request.headers.get("content-type", "application/x-protobuf"),
+            trace_exists=store.trace_exists,
         )
         # 请求头可覆盖 resource 上的 aios.ingest.source
         header_source = _ingest_source(request, "")

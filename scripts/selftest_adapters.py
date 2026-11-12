@@ -6,8 +6,11 @@
   2. Claude Code：token 读取 input_tokens/output_tokens/cache_read_tokens/
      cache_creation_tokens，total = input+output+cache_read+cache_write，
      工具只由父 span 计数、错误只由 execution 子 span 计数（不双算）；
-  3. registry 自动探测选对适配器；
-  4. 0 时间戳不污染 started/ended，str(None) 不污染 run_id/service_name。
+  3. Codex：run_turn 根 span 判定 run trace、stream_request 计模型调用、
+     codex.tool.phase=dispatch 计工具（unified_exec 子 span 不双算），
+     token 从 exec JSONL 的 turn.completed 解析并按 input+output 汇总；
+  4. registry 自动探测选对适配器；
+  5. 0 时间戳不污染 started/ended，str(None) 不污染 run_id/service_name。
 
 运行：`.venv/bin/python scripts/selftest_adapters.py`
 """
@@ -19,6 +22,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from aios_trace_eval.adapters.registry import select_adapter
+from aios_trace_eval.adapters.codex.normalizer import CodexAdapter
 from aios_trace_eval.adapters.dsh.normalizer import DSHAdapter
 from aios_trace_eval.adapters.claude_code.normalizer import ClaudeCodeAdapter
 
@@ -94,6 +98,36 @@ def claude_spans():
     ]
 
 
+def codex_spans():
+    # run_turn 根 + 两次模型请求 + 一次工具 dispatch（unified_exec 子 span 不双算）。
+    return [
+        span("r", "run_turn", {
+            "conversation.id": "conv-1", "turn.id": "turn-1",
+        }, start=1_000_000, end=9_000_000_000),
+        span("b", "built_tools", {"model": "gpt-5.6-sol"},
+             start=1_500_000, end=1_600_000, parent="r"),
+        span("m1", "stream_request", {}, start=2_000_000, end=5_000_000_000, parent="r"),
+        span("m1x", "responses_websocket.stream_request", {},
+             start=2_100_000, end=4_900_000_000, parent="m1"),
+        span("t1", "exec_command", {
+            "codex.tool.phase": "dispatch", "tool_name": "exec_command",
+        }, status="error", start=5_100_000_000, end=5_400_000_000, parent="r"),
+        span("t1x", "unified_exec.exec_command", {}, status="error",
+             start=5_100_000_000, end=5_400_000_000, parent="t1"),
+        span("m2", "stream_request", {}, start=6_000_000_000, end=8_000_000_000, parent="r"),
+    ]
+
+
+CODEX_EXEC_STDOUT = "\n".join([
+    '{"type":"thread.started","thread_id":"01a1d070"}',
+    '{"type":"turn.started"}',
+    '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"我先运行命令。"}}',
+    '{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"OTLP_OK"}}',
+    '{"type":"turn.completed","usage":{"input_tokens":16156,"cached_input_tokens":12672,'
+    '"cache_write_input_tokens":0,"output_tokens":7,"reasoning_output_tokens":0}}',
+])
+
+
 def main() -> int:
     print("== DSH 适配器 ==")
     run = DSHAdapter().normalize_run(dsh_spans(), {"service.name": "dsh-agent"}, "trace_dsh")
@@ -122,9 +156,42 @@ def main() -> int:
     check("tool_errors(仅 execution)", s["tool_errors"], 1)
     check("started 未被 0 污染", s["started_at_ns"], 100_000_000)
 
+    print("== Codex 适配器 ==")
+    adapter = CodexAdapter()
+    resource = {"service.name": "codex_exec", "aios.run.id": "run_x", "aios.case.id": "case_x"}
+    run = adapter.normalize_run(codex_spans(), resource, "trace_codex")
+    s = run.to_trace_summary()
+    check("model", s["model"], "gpt-5.6-sol")
+    check("model_calls", s["model_calls"], 2)
+    check("tool_calls(仅 dispatch)", s["tool_calls"], 1)
+    check("tool_errors(仅 dispatch)", s["tool_errors"], 1)
+    check("run_id(resource 优先)", s["run_id"], "run_x")
+    check("case_id", s["case_id"], "case_x")
+    check("span 不含 usage，token 保持 0", s["total_tokens"], 0)
+    check("is_run_trace(run_turn 根)", adapter.is_run_trace(codex_spans()), True)
+    check("is_run_trace(诊断 trace 丢弃)", adapter.is_run_trace(
+        [span("d", "fs.read_file", {}, start=1, end=2)]), False)
+    check("parse_output(最后一条 agent_message)", adapter.parse_output(CODEX_EXEC_STDOUT), "OTLP_OK")
+    check("parse_execution_usage", adapter.parse_execution_usage(CODEX_EXEC_STDOUT), {
+        "input_tokens": 16156, "output_tokens": 7, "cache_read_tokens": 12672,
+        "cache_write_tokens": 0, "reasoning_tokens": 0,
+    })
+    check("parse_execution_usage(无事件返回 None)",
+          adapter.parse_execution_usage("no events"), None)
+    command = adapter.build_command({"input": "只回答：OTLP_OK"}, {
+        "otlp_endpoint": "http://127.0.0.1:8080/", "profile": "", "model": "gpt-5.6-sol",
+    })
+    check("build_command(--json 非交互)", command[1:4], ["exec", "--skip-git-repo-check", "--json"])
+    check("build_command(-c 注入完整 /v1/traces)",
+          command[4:6], ["-c", "otel.trace_exporter={otlp-http={endpoint='http://127.0.0.1:8080/v1/traces',protocol='binary'}}"])
+    check("build_command(模型 -m)", command[6:8], ["-m", "gpt-5.6-sol"])
+    check("build_command(无 profile 默认不传)", any(x == "--profile" for x in command), False)
+
     print("== 自动探测 ==")
     check("DSH 探测", select_adapter(dsh_spans(), {"service.name": "dsh-agent"}).name, "dsh")
     check("Claude 探测", select_adapter(claude_spans(), {"service.name": "claude-code"}).name, "claude_code")
+    check("Codex 探测(service)", select_adapter(codex_spans(), {"service.name": "codex_exec"}).name, "codex")
+    check("Codex 探测(run_turn)", select_adapter(codex_spans(), {}).name, "codex")
 
     print()
     if FAILURES:

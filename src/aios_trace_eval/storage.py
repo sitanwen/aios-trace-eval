@@ -443,6 +443,12 @@ class Store:
         columns = list(trace)
         values = [trace[column] for column in columns]
         preserve_when_missing = {"case_id", "experiment_id", "version", "agent", "provider", "model"}
+        # token 用量只随 span 增加而增长；多批次到达时部分批次的归一化结果可能
+        # 为 0（或 Runner 已回填），不能让局部汇总把已有用量覆盖掉。
+        token_columns = {
+            "input_tokens", "output_tokens", "cache_read_tokens",
+            "cache_write_tokens", "reasoning_tokens", "total_tokens",
+        }
         updates = []
         for column in columns:
             if column == "trace_id":
@@ -454,6 +460,11 @@ class Store:
                 )
             elif column in preserve_when_missing:
                 updates.append(f"{column}=COALESCE(excluded.{column}, traces.{column})")
+            elif column in token_columns:
+                updates.append(
+                    f"{column}=CASE WHEN excluded.{column} > 0 "
+                    f"THEN excluded.{column} ELSE traces.{column} END"
+                )
             else:
                 updates.append(f"{column}=excluded.{column}")
         update = ", ".join(updates)
@@ -488,6 +499,12 @@ class Store:
             row["_attributes"] = json.loads(row["attributes_json"] or "{}")
         return rows
 
+    def trace_exists(self, trace_id: str) -> bool:
+        with self.connection() as db:
+            return db.execute(
+                "SELECT 1 FROM traces WHERE trace_id=?", (trace_id,)
+            ).fetchone() is not None
+
     def get_trace_by_run_id(self, run_id: str) -> Optional[Dict[str, Any]]:
         with self.connection() as db:
             row = db.execute("""
@@ -496,6 +513,16 @@ class Store:
                 LIMIT 1
             """, (run_id,)).fetchone()
         return self.get_trace(row["trace_id"]) if row else None
+
+    def update_trace_usage(self, trace_id: str, usage: Dict[str, int]) -> bool:
+        """整体覆盖一条 trace 的 token 用量（调用方是该用量的唯一来源时使用）。"""
+        columns = ", ".join(f"{key}=?" for key in usage)
+        with self._lock, self.connection() as db:
+            cursor = db.execute(
+                f"UPDATE traces SET {columns} WHERE trace_id=?",
+                (*usage.values(), trace_id),
+            )
+            return cursor.rowcount > 0
 
     def create_attempt(self, experiment_id: str, case_id: str, run_id: str,
                        run_batch_id: Optional[str] = None) -> Dict[str, Any]:

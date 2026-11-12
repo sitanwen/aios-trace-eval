@@ -50,7 +50,7 @@ def _execute_cli(
     if cwd and not Path(cwd).expanduser().is_dir():
         raise RuntimeError(f"Agent 工作目录不存在：{cwd}")
     process = subprocess.Popen(
-        command, cwd=cwd, env=environment,
+        command, cwd=cwd, env=environment, stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, encoding="utf-8", errors="replace",
     )
@@ -107,7 +107,7 @@ def _adapter_name_for_protocol(protocol: Optional[str]) -> str:
     name = (protocol or "").strip().lower()
     if name in {"", "openclaw", "openclaw_gateway"}:
         return "openclaw"
-    if name in {"claude_code", "dsh", "hermes", "generic"}:
+    if name in {"claude_code", "dsh", "hermes", "codex", "generic"}:
         return name
     return "openclaw"
 
@@ -335,7 +335,7 @@ def _run_one_case(base_url: str, experiment_id: str, case: Dict[str, Any], *,
     environment = os.environ.copy()
     _set_run_resource_attributes(
         environment, run_id, case["case_id"], experiment_id,
-        include_run_id=adapter_name in {"claude_code", "dsh", "hermes"},
+        include_run_id=adapter_name in {"claude_code", "dsh", "hermes", "codex"},
     )
     before = {item["trace_id"] for item in _request(base_url, "/api/traces?limit=200")}
     invocation_started_ns = time.time_ns()
@@ -366,6 +366,7 @@ def _run_one_case(base_url: str, experiment_id: str, case: Dict[str, Any], *,
                               shlex.split(environment.get("AIOS_AGENT_EXTRA_ARGS") or ""),
                 "executable": agent_config.get("executable"),
                 "working_directory": agent_config.get("working_directory"),
+                "otlp_endpoint": base_url.rstrip("/"),
             }
             plan = adapter.build_execution(case, context)
             command, cwd = plan.command, plan.cwd
@@ -394,6 +395,11 @@ def _run_one_case(base_url: str, experiment_id: str, case: Dict[str, Any], *,
                 # DSH(Node) 不支持 SOCKS 代理，移除 all_proxy 免得报错
                 environment.pop("all_proxy", None)
                 environment.pop("ALL_PROXY", None)
+            elif adapter_name == "codex":
+                # Codex 原生 [otel] 只读 config.toml（Runner 经 -c 注入 endpoint），
+                # 忽略 OTEL_* 环境变量；OTEL_SERVICE_NAME 供资源采样与降级关联
+                # 使用，trace 实际 service.name 由 codex 自行置为 codex_exec。
+                environment.setdefault("OTEL_SERVICE_NAME", "codex_exec")
         if adapter_name == "openclaw":
             completed = subprocess.run(
                 command, cwd=cwd,
@@ -413,6 +419,10 @@ def _run_one_case(base_url: str, experiment_id: str, case: Dict[str, Any], *,
             )
         output = _extract_output(json.loads(completed.stdout)) if parse_json \
             else adapter.parse_output(completed.stdout, completed.stderr)
+        # codex 原生 trace 不含 usage：从执行结果提取，trace 关联后回填。
+        exec_usage = None
+        if not parse_json and hasattr(adapter, "parse_execution_usage"):
+            exec_usage = adapter.parse_execution_usage(completed.stdout)
     except Exception as exc:
         _request(base_url, f"/api/attempts/{run_id}", "PATCH", {
             "status": "runtime_error", "error_type": type(exc).__name__,
@@ -429,11 +439,13 @@ def _run_one_case(base_url: str, experiment_id: str, case: Dict[str, Any], *,
     candidate_id = None
     candidate_since = None
     while time.time() < deadline:
-        if adapter_name in {"claude_code", "dsh", "hermes"}:
+        if adapter_name in {"claude_code", "dsh", "hermes", "codex"}:
             try:
                 exact = _request(base_url, f"/api/traces/by-run-id/{run_id}")["trace"]
+                # 提供 exec usage 的平台（codex）trace 归一化后 token 为 0，
+                # 由回填补全，因此放宽 token 条件。
                 if exact.get("runtime_status") == "completed" \
-                        and (exact.get("total_tokens") or 0) > 0:
+                        and ((exact.get("total_tokens") or 0) > 0 or exec_usage is not None):
                     trace = exact
                     break
             except RuntimeError as exc:
@@ -459,6 +471,10 @@ def _run_one_case(base_url: str, experiment_id: str, case: Dict[str, Any], *,
             "error_message": message,
         })
         raise RuntimeError(message)
+
+    if exec_usage is not None:
+        # 在评分前补全 token，使 Token 规则类评估器拿到真实用量。
+        _request(base_url, f"/api/traces/{trace['trace_id']}/usage", "PATCH", exec_usage)
 
     _request(base_url, f"/api/attempts/{run_id}", "PATCH", {
         "status": "evaluating", "trace_id": trace["trace_id"], "actual_output": output,

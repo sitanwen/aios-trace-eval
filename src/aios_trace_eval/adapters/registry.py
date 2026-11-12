@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 
 from .base import AgentAdapter
 from .claude_code.normalizer import ClaudeCodeAdapter
+from .codex.normalizer import CodexAdapter
 from .dsh.normalizer import DSHAdapter
 from .generic.normalizer import GenericGenAIAdapter
 from .hermes.normalizer import HermesAdapter
@@ -24,6 +25,7 @@ def _build_registry() -> Dict[str, AgentAdapter]:
         DSHAdapter(),
         ClaudeCodeAdapter(),
         HermesAdapter(),
+        CodexAdapter(),
         GenericGenAIAdapter(),
     ]
     return {adapter.name: adapter for adapter in instances}

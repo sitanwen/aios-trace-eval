@@ -1,0 +1,15 @@
+# Codex CLI 遥测接入样例
+# 采集组件：Codex CLI 原生 [otel]（0.160+ 内置，无需安装插件）
+# 应用方式：把 [otel] 表合并到 ~/.codex/config.toml，或用 -c 在单次运行注入
+# 非交互执行：codex exec --skip-git-repo-check "<task>"
+
+[otel]
+# endpoint 必须是完整的 /v1/traces 地址；protocol = "binary" 即 http/protobuf
+trace_exporter = { otlp-http = { endpoint = "http://localhost:8080/v1/traces", protocol = "binary" } }
+
+# 需要鉴权时（header 值按端点要求填写）：
+# trace_exporter = { otlp-http = { endpoint = "https://eval.example.com/v1/traces", protocol = "binary", headers = { Authorization = "Bearer <token>" } } }
+
+# 不改全局配置时，可在单次运行注入同样的值。
+# Windows 下经过 .cmd 包装启动时建议使用 TOML 单引号字面量，避免引号被剥离：
+#   codex exec --skip-git-repo-check -c "otel.trace_exporter={otlp-http={endpoint='http://localhost:8080/v1/traces',protocol='binary'}}" "<task>"

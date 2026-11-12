@@ -1,6 +1,6 @@
 # Agent 接入指南
 
-平台通过 **OTLP/HTTP** 接收各 Agent 的 trace，并**自动识别平台**（Claude Code / DeepSeek Harness / OpenClaw / Hermes / 通用 GenAI），统一归一化后入库、评测、展示。因此「接入」本质上是：
+平台通过 **OTLP/HTTP** 接收各 Agent 的 trace，并**自动识别平台**（Claude Code / DeepSeek Harness / Codex CLI / OpenClaw / Hermes / 通用 GenAI），统一归一化后入库、评测、展示。因此「接入」本质上是：
 
 > 让你的 Agent 把 OTLP trace 报到平台的 `/v1/traces` 地址。
 
@@ -26,9 +26,9 @@ X-AIOS-Ingest-Source: pilot
 |---|---|
 | **观测**：agent 推 trace → 前端「运行记录」看到归一化结果 | ✅ 全部平台 |
 | **评测评分**：对入库 trace 跑规则/Judge 评估 | ✅ 全部平台 |
-| **一键跑实验**（平台主动调用 agent 逐个执行 case） | ✅ OpenClaw Gateway、Claude Code/DSH/Hermes Local CLI |
+| **一键跑实验**（平台主动调用 agent 逐个执行 case） | ✅ OpenClaw Gateway、Claude Code/DSH/Hermes/Codex Local CLI |
 
-Claude Code / DSH / Hermes 使用 Local CLI 模式时，平台直接启动 CLI，并采集完整进程树的 CPU 与 RSS。Trace 优先精确关联，无法携带关联属性时按同平台新增 Trace 与执行时间窗回退。Remote Worker 尚未开放；其它机器目前使用“仅观测”模式。
+Claude Code / DSH / Hermes / Codex 使用 Local CLI 模式时，平台直接启动 CLI，并采集完整进程树的 CPU 与 RSS。Trace 优先精确关联，无法携带关联属性时按同平台新增 Trace 与执行时间窗回退。Remote Worker 尚未开放；其它机器目前使用“仅观测”模式。
 
 ---
 
@@ -62,7 +62,26 @@ dsh --profile headless "<任务>"
 
 > 对应样例：`config/dsh-otel.env`。
 
-## 3. OpenClaw
+## 3. Codex CLI
+
+Codex 0.160+ 内置 OTel 导出，无需额外安装插件。在 `~/.codex/config.toml` 增加 `[otel]` 表：
+
+```toml
+[otel]
+trace_exporter = { otlp-http = { endpoint = "<AIOS_HOST>/v1/traces", protocol = "binary" } }
+```
+
+`endpoint` 必须写完整的 `/v1/traces` 地址；`protocol = "binary"` 即 http/protobuf。非交互执行 `codex exec "<任务>"`；不想改全局配置时，可用 `-c` 在单次运行注入同样的值（Windows 下经过 `.cmd` 包装启动时，建议使用 TOML 单引号字面量，避免引号被剥离）：
+
+```bash
+codex exec --skip-git-repo-check -c "otel.trace_exporter={otlp-http={endpoint='<AIOS_HOST>/v1/traces',protocol='binary'}}" "<任务>"
+```
+
+> 对应样例：`config/codex-otel.toml`。
+
+Codex 原生 Trace 不含 usage：Local CLI 一键运行时，token 用量由平台 Runner 从 `codex exec` 的执行结果补全；仅观测模式暂不采集 token。`cached_input_tokens` 是 input 的子集，`reasoning_output_tokens` 已计入 output。另外 Codex 可能把采样分支 span 归到会话 trace（`thread/start`）；平台只归一化含 `run_turn` 的任务 trace，模型调用计数可能不完整，token 用量与评分不受影响。
+
+## 4. OpenClaw
 
 在 OpenClaw 配置里把 OTLP endpoint 指向平台：
 
@@ -84,7 +103,7 @@ dsh --profile headless "<任务>"
 执行：既可在平台「评测实验」里一键运行，也可直接 `openclaw agent "<任务>"`。
 > 对应样例：`config/openclaw-otel.json5`。
 
-## 4. Hermes Agent（Nous Research）
+## 5. Hermes Agent（Nous Research）
 
 ```bash
 # 安装到 Hermes 实际使用的 Python 环境
@@ -104,7 +123,7 @@ hermes chat -Q -q "<任务>"
 > `reasoning` 已包含在 `output` 中，不重复累加。
 > 内容默认不采集；受控环境可设置 `HERMES_OTEL_CAPTURE_CONTENT=true`。
 
-## 5. 通用 GenAI（OpenAI 兼容，如 opentelemetry-instrumentation-openai 埋点）
+## 6. 通用 GenAI（OpenAI 兼容，如 opentelemetry-instrumentation-openai 埋点）
 
 ```bash
 export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
@@ -115,12 +134,13 @@ export OTEL_EXPORTER_OTLP_ENDPOINT=<AIOS_HOST>
 
 ---
 
-## 6. 如何确认接入成功
+## 7. 如何确认接入成功
 
 去前端「运行记录」页，应看到一条对应平台的 trace：
 
 - **Claude Code**：`model=claude-sonnet-4`（或你的默认模型）、`service=claude-code`，`total_tokens > 0`；
 - **DSH**：`service=dsh-agent`，`total_tokens > 0`；
+- **Codex CLI**：`service=codex_exec`，Trace 根 Span 为 `run_turn`，Local CLI 一键运行时 `total_tokens > 0`；
 - **OpenClaw**：`service` 为你的 openclaw serviceName；
 - **Hermes**：`service=hermes-agent`，`total_tokens > 0`，轨迹里有 `chat <model>` 与 `hermes.tool.*`；
 - **通用 GenAI**：`model/provider` 来自 `gen_ai.*` 字段。
@@ -129,12 +149,13 @@ export OTEL_EXPORTER_OTLP_ENDPOINT=<AIOS_HOST>
 
 ---
 
-## 7. 平台如何识别（排查用）
+## 8. 平台如何识别（排查用）
 
 | 平台 | 识别特征 | token 口径 |
 |---|---|---|
 | Claude Code | span 名 `claude_code.*` | `input/output/cache_read/cache_creation_tokens`，total = input+output+cache_read+cache_write |
 | DSH | span 名 `chat / execute_tool / invoke_agent` + `gen_ai.*` | total = input + output（cache_read 是 input 子集）|
+| Codex CLI | `service.name=codex_exec`、根 span `run_turn` | 原生 trace 不含 usage；Local CLI 由 Runner 回填，total = input + output（cached_input 是 input 子集，reasoning 已计入 output）|
 | OpenClaw | span 名 `openclaw.*` | total = input+output+cache_read+cache_write+reasoning |
 | Hermes | span 名 `hermes.session / hermes.turn / hermes.tool.*` | total = input+output+cache_read+cache_write（reasoning 含在 output）|
 | 通用 GenAI | 标准 `gen_ai.*` | total = 各分类之和 |
