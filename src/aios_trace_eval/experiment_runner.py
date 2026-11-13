@@ -293,6 +293,7 @@ def _select_new_trace(
     *,
     service_name: str = "",
     started_at_ns: int = 0,
+    allow_zero_tokens: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """Select the primary completed Trace without relying on propagated run_id."""
     candidates = []
@@ -305,7 +306,9 @@ def _select_new_trace(
             continue
         if item.get("runtime_status") != "completed":
             continue
-        if (item.get("total_tokens") or 0) <= 0 or (item.get("duration_ms") or 0) <= 0:
+        if (item.get("total_tokens") or 0) <= 0 and not allow_zero_tokens:
+            continue
+        if (item.get("duration_ms") or 0) <= 0:
             continue
         candidates.append(item)
     if not candidates:
@@ -455,6 +458,9 @@ def _run_one_case(base_url: str, experiment_id: str, case: Dict[str, Any], *,
         candidate = _select_new_trace(
             base_url, before, service_name=service_name,
             started_at_ns=invocation_started_ns,
+            # codex 的 usage 在 CLI 输出里，Trace 归一化后 token 为 0；
+            # 允许先按服务名与时间窗选中，再回填 usage。
+            allow_zero_tokens=exec_usage is not None,
         )
         if candidate:
             if candidate["trace_id"] != candidate_id:

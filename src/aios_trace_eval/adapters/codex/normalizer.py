@@ -41,6 +41,7 @@ class CodexAdapter(AgentAdapter):
     capabilities = AdapterCapabilities(
         execute=True,
         process_metrics=True,
+        session_context=True,
         execution_modes=("local_cli", "observe_only"),
     )
 
@@ -71,6 +72,22 @@ class CodexAdapter(AgentAdapter):
         model = provider = conversation_id = turn_id = ""
         canonical_spans: List[CanonicalSpan] = []
 
+        span_by_id = {str(item.get("span_id", "")): item for item in spans}
+
+        def is_tool_span(span: Dict[str, Any]) -> bool:
+            """dispatch span 及其执行子 span 都属于工具环节。"""
+            current: Optional[Dict[str, Any]] = span
+            seen = set()
+            while current is not None:
+                span_id = str(current.get("span_id", ""))
+                if span_id in seen:
+                    break
+                seen.add(span_id)
+                if su.attrs(current).get(F.ATTR_TOOL_PHASE) == F.TOOL_PHASE_DISPATCH:
+                    return True
+                current = span_by_id.get(str(current.get("parent_span_id", "")))
+            return False
+
         for span in spans:
             a = su.attrs(span)
             name = str(span.get("name", ""))
@@ -94,12 +111,16 @@ class CodexAdapter(AgentAdapter):
                 model_calls += 1
 
             # 工具调用：只计 dispatch；unified_exec.exec_command 是执行子 span。
-            if a.get(F.ATTR_TOOL_PHASE) == F.TOOL_PHASE_DISPATCH:
+            is_dispatch_tool = a.get(F.ATTR_TOOL_PHASE) == F.TOOL_PHASE_DISPATCH
+            tool_span = is_tool_span(span)
+            if is_dispatch_tool:
                 tool_calls += 1
                 if span.get("status") == "error":
                     tool_errors += 1
 
-            if span.get("status") == "error":
+            # 工具失败不等于运行失败：否则 Runner 会因 runtime_status!=completed
+            # 找不到这条 Trace，把可评分的运行误判为 telemetry_missing。
+            if span.get("status") == "error" and not tool_span:
                 runtime_status = "error"
 
             if name == F.SPAN_RUN_TURN:

@@ -165,6 +165,8 @@ def main() -> int:
     check("model_calls", s["model_calls"], 2)
     check("tool_calls(仅 dispatch)", s["tool_calls"], 1)
     check("tool_errors(仅 dispatch)", s["tool_errors"], 1)
+    check("runtime_status(工具失败不阻断运行)", s["runtime_status"], "completed")
+    check("session_context", adapter.capabilities.session_context, True)
     check("run_id(resource 优先)", s["run_id"], "run_x")
     check("case_id", s["case_id"], "case_x")
     check("span 不含 usage，token 保持 0", s["total_tokens"], 0)
