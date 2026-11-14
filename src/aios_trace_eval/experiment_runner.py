@@ -3,13 +3,16 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import shlex
 import shutil
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
 import uuid
+from hashlib import sha256
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import quote, urlparse
@@ -21,6 +24,125 @@ from .process_resource import ProcessTreeSampler
 ProgressFn = Callable[[str, int, int, str, Optional[str]], None]
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_OPENCLAW_ROOT = PROJECT_ROOT / "work" / "openclaw-8.2"
+DEFAULT_WORKSPACE_ROOT = PROJECT_ROOT / "work" / "runs"
+
+# 工作区复制时跳过的内容：版本库与依赖目录体积大，且不属于任务初始状态。
+_WORKSPACE_IGNORE = (".git", "node_modules", ".venv", "__pycache__")
+
+
+def _probe_version(executable: str, environment: Dict[str, str]) -> str:
+    """读取 Agent CLI 版本，写入环境指纹；失败返回 unknown 而不是中断运行。
+
+    Windows 上 npm 安装的 CLI 入口是 .cmd/.bat，subprocess 需要经 cmd /c 执行。
+    """
+    resolved = shutil.which(executable, path=environment.get("PATH")) or executable
+    command: List[str] = [resolved]
+    if os.name == "nt" and Path(resolved).suffix.lower() in {".cmd", ".bat"}:
+        command = ["cmd", "/c", resolved]
+    command.append("--version")
+    try:
+        completed = subprocess.run(
+            command, env=environment, stdin=subprocess.DEVNULL,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    text = (completed.stdout or "").strip() or (completed.stderr or "").strip()
+    first = next((line.strip() for line in text.splitlines() if line.strip()), "")
+    return first[:80] or "unknown"
+
+
+def _prepare_workspace(
+    run_id: str,
+    experiment_id: str,
+    template: Optional[str],
+    keep: bool,
+) -> tuple[str, str, str]:
+    """为单次运行准备独立工作区，返回 (路径, 模式, 模板路径)。
+
+    每次运行使用自己的目录，避免 Case 之间互相污染、失败后残留影响后续运行。
+    若 Agent 配置了工作目录，则把它当作只读模板复制一份；否则建空目录。
+    """
+    root = Path(os.environ.get("AIOS_WORKSPACE_ROOT") or DEFAULT_WORKSPACE_ROOT)
+    destination = root / experiment_id / run_id
+    destination.mkdir(parents=True, exist_ok=True)
+    source = Path(template).expanduser() if template else None
+    if source is not None and not source.is_dir():
+        raise RuntimeError(f"Agent 工作目录模板不存在：{source}")
+    if source is not None:
+        shutil.copytree(
+            source, destination, dirs_exist_ok=True,
+            ignore=shutil.ignore_patterns(*_WORKSPACE_IGNORE),
+        )
+        mode = "template_copy"
+        template_label = str(source.resolve())
+    else:
+        mode = "empty_workspace"
+        template_label = ""
+    marker = destination / ".aios-workspace.json"
+    marker.write_text(json.dumps({
+        "run_id": run_id, "experiment_id": experiment_id,
+        "mode": mode, "template": template_label,
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "keep": keep,
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
+    return str(destination.resolve()), mode, template_label
+
+
+def _environment_fingerprint(
+    *, run_id: str, experiment_id: str, case_id: str, adapter_name: str,
+    agent_name: str, agent_version: str, model: str, timeout_s: int,
+    workspace_path: str, workspace_mode: str, workspace_template: str,
+    sampler_scope: str, sampler_interval: float,
+) -> Dict[str, Any]:
+    """构造环境指纹：comparison 用于判定可比性，tested 是被测变量。"""
+    os_name = platform.system() or sys.platform
+    platform_label = platform.platform()
+    cpus = os.environ.get("AIOS_CPU_LIMIT") or None
+    memory_mb = os.environ.get("AIOS_MEMORY_LIMIT_MB") or None
+    comparison = {
+        "os": os_name,
+        "platform": platform_label,
+        "timeout_sec": timeout_s,
+        "workspace_mode": workspace_mode,
+        "cpus": cpus,
+        "memory_mb": memory_mb,
+        "sampler_scope": sampler_scope,
+    }
+    tested = {"agent": adapter_name, "model": model or ""}
+    hash_source = json.dumps(comparison, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    fingerprint = {
+        "tested": tested,
+        "comparison": comparison,
+        "agent": {"name": agent_name, "version": agent_version, "runtime": adapter_name},
+        "host": {
+            "os": os_name, "platform": platform_label,
+            "python": platform.python_version(), "arch": platform.machine(),
+        },
+        "execution": {
+            "mode": "local_cli" if adapter_name != "openclaw" else "gateway",
+            "timeout_sec": timeout_s, "concurrency": 1,
+        },
+        "resources": {"cpus": cpus, "memory_mb": memory_mb, "enforced": bool(cpus or memory_mb)},
+        "sampler": {"scope": sampler_scope, "interval_sec": sampler_interval},
+        "workspace": {"path": workspace_path, "mode": workspace_mode, "template": workspace_template},
+    }
+    return {
+        "run_id": run_id,
+        "experiment_id": experiment_id,
+        "case_id": case_id,
+        "agent": agent_name,
+        "agent_version": agent_version,
+        "runtime": adapter_name,
+        "model": model or "",
+        "os": os_name,
+        "timeout_sec": float(timeout_s),
+        "workspace_mode": workspace_mode,
+        "workspace_path": workspace_path,
+        "comparison_hash": sha256(hash_source.encode("utf-8")).hexdigest()[:16],
+        "fingerprint": fingerprint,
+    }
 
 
 def _execute_cli(
@@ -342,13 +464,27 @@ def _run_one_case(base_url: str, experiment_id: str, case: Dict[str, Any], *,
     )
     before = {item["trace_id"] for item in _request(base_url, "/api/traces?limit=200")}
     invocation_started_ns = time.time_ns()
+    keep_workspace = os.environ.get("AIOS_KEEP_WORKSPACES", "1") != "0"
+    workspace_path = ""
     try:
+        # 每次运行独立工作区：模板只读复制，运行结束按配置保留或清理。
+        workspace_path, workspace_mode, workspace_template = _prepare_workspace(
+            run_id, experiment_id,
+            agent_config.get("working_directory"), keep_workspace,
+        )
         if adapter_name == "openclaw":
             environment["OPENCLAW_GATEWAY_PORT"] = gateway_port
-            command, cwd = _openclaw_command(
+            command, _configured_cwd = _openclaw_command(
                 case["input"], session_id, agent, timeout_s, environment
             )
+            cwd = workspace_path
             parse_json = True
+            agent_version = _probe_version(
+                environment.get("AIOS_OPENCLAW_COMMAND") or "openclaw", environment
+            )
+            agent_label = agent
+            model = ""
+            sampler_scope = "gateway_process"
         else:
             adapter = get_adapter(adapter_name)
             execution_mode = agent_config.get("execution_mode") or "local_cli"
@@ -368,12 +504,20 @@ def _run_one_case(base_url: str, experiment_id: str, case: Dict[str, Any], *,
                 "extra_args": configured_args or
                               shlex.split(environment.get("AIOS_AGENT_EXTRA_ARGS") or ""),
                 "executable": agent_config.get("executable"),
-                "working_directory": agent_config.get("working_directory"),
+                # 独立工作区取代用户配置目录：模板内容已复制到本次运行目录。
+                "working_directory": workspace_path,
                 "otlp_endpoint": base_url.rstrip("/"),
             }
             plan = adapter.build_execution(case, context)
-            command, cwd = plan.command, plan.cwd
+            command = plan.command
+            cwd = workspace_path
             parse_json = False
+            agent_version = _probe_version(
+                str(agent_config.get("executable") or command[0]), environment
+            )
+            agent_label = adapter_name
+            model = str(context.get("model") or "")
+            sampler_scope = "process_tree"
             environment.setdefault("OTEL_TRACES_EXPORTER", "otlp")
             environment.setdefault("OTEL_METRICS_EXPORTER", "otlp")
             environment.setdefault("OTEL_LOGS_EXPORTER", "otlp")
@@ -403,6 +547,20 @@ def _run_one_case(base_url: str, experiment_id: str, case: Dict[str, Any], *,
                 # 忽略 OTEL_* 环境变量；OTEL_SERVICE_NAME 供资源采样与降级关联
                 # 使用，trace 实际 service.name 由 codex 自行置为 codex_exec。
                 environment.setdefault("OTEL_SERVICE_NAME", "codex_exec")
+
+        # 环境指纹：执行前上报，作为"这次运行在什么环境下发生"的可核查记录。
+        sampler_interval = float(os.environ.get("AIOS_RESOURCE_SAMPLE_SECONDS", "0.5"))
+        _request(base_url, f"/api/runs/{run_id}/environment", "POST",
+                 _environment_fingerprint(
+                     run_id=run_id, experiment_id=experiment_id,
+                     case_id=case["case_id"], adapter_name=adapter_name,
+                     agent_name=agent_label, agent_version=agent_version,
+                     model=model, timeout_s=timeout_s,
+                     workspace_path=workspace_path, workspace_mode=workspace_mode,
+                     workspace_template=workspace_template,
+                     sampler_scope=sampler_scope, sampler_interval=sampler_interval,
+                 ))
+
         if adapter_name == "openclaw":
             completed = subprocess.run(
                 command, cwd=cwd,
@@ -432,6 +590,10 @@ def _run_one_case(base_url: str, experiment_id: str, case: Dict[str, Any], *,
             "error_message": str(exc),
         })
         raise
+    finally:
+        # 默认保留工作区供排查；AIOS_KEEP_WORKSPACES=0 时执行完即清理。
+        if workspace_path and not keep_workspace:
+            shutil.rmtree(workspace_path, ignore_errors=True)
 
     _request(base_url, f"/api/attempts/{run_id}", "PATCH", {
         "status": "awaiting_trace", "actual_output": output,

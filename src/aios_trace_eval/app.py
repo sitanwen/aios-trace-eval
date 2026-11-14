@@ -148,6 +148,27 @@ class ResourceSamplesInput(BaseModel):
     samples: list[dict]
 
 
+class RunEnvironmentInput(BaseModel):
+    """Runner 上报的执行环境指纹。
+
+    环境一致性只比较 comparison 内的字段；agent 与 model 是被测变量，
+    单独作为 tested_variables 呈现，不计入"环境不一致"。
+    """
+
+    experiment_id: str
+    case_id: str
+    agent: str = ""
+    agent_version: str = ""
+    runtime: str = ""
+    model: str = ""
+    os: str = ""
+    timeout_sec: Optional[float] = None
+    workspace_mode: str = ""
+    workspace_path: str = ""
+    comparison_hash: str = ""
+    fingerprint: dict = {}
+
+
 class TraceUsageInput(BaseModel):
     input_tokens: int = 0
     output_tokens: int = 0
@@ -483,6 +504,103 @@ def receive_resource_samples(body: ResourceSamplesInput) -> dict:
     samples = [sample for sample in body.samples if sample.get("metric_name") in allowed]
     store.upsert_metric_samples(samples)
     return {"accepted": len(samples)}
+
+
+# 环境一致性维度：这些值不同，两次运行就不是同一环境，不能直接对比。
+ENVIRONMENT_COMPARISON_KEYS = (
+    ("os", "操作系统"),
+    ("platform", "平台"),
+    ("timeout_sec", "时间预算"),
+    ("workspace_mode", "工作区模式"),
+    ("cpus", "CPU 上限"),
+    ("memory_mb", "内存上限"),
+    ("sampler_scope", "资源采样口径"),
+)
+# 被测变量：跨 run 变化是实验设计的一部分，不作为环境不一致。
+TESTED_VARIABLES = (("agent", "Agent"), ("model", "模型"))
+
+
+def _environment_value_label(key: str, value) -> str:
+    """把环境项取值转成页面可读标签。"""
+    if value is None:
+        return "未限制"
+    if key == "workspace_mode":
+        return {"empty_workspace": "空工作区", "template_copy": "模板复制"}.get(str(value), str(value))
+    if isinstance(value, bool):
+        return "是" if value else "否"
+    return str(value)
+
+
+def _environment_consistency(records: list[dict]) -> dict:
+    """汇总同一实验内所有 Run 的环境指纹，判断是否可比。"""
+    if not records:
+        return {"comparable": True, "differences": [], "tested_variables": [],
+                "summary": "还没有运行记录"}
+    hashes = {record.get("comparison_hash") or "" for record in records}
+    differences = []
+    for key, label in ENVIRONMENT_COMPARISON_KEYS:
+        values = {}
+        for record in records:
+            raw = (record.get("fingerprint") or {}).get("comparison", {}).get(key)
+            text = _environment_value_label(key, raw)
+            values[text] = values.get(text, 0) + 1
+        if len(values) > 1:
+            differences.append({"key": key, "label": label, "values": values})
+    tested = []
+    for key, label in TESTED_VARIABLES:
+        values = sorted({str((record.get("fingerprint") or {}).get("tested", {}).get(key) or "") for record in records})
+        values = [value for value in values if value]
+        if len(values) > 1:
+            tested.append({"key": key, "label": label, "values": values})
+    comparable = not differences
+    if comparable:
+        summary = "环境一致，可直接对比"
+        if tested:
+            summary += "；被测变量：" + "、".join(
+                f"{item['label']}＝{' / '.join(item['values'])}" for item in tested
+            )
+    else:
+        summary = "环境不一致：" + "；".join(
+            f"{item['label']} 存在 {' / '.join(item['values'].keys())}"
+            for item in differences
+        )
+    return {
+        "comparable": comparable,
+        "comparison_hashes": sorted(hashes),
+        "differences": differences,
+        "tested_variables": tested,
+        "summary": summary,
+    }
+
+
+@app.post("/api/runs/{run_id}/environment", status_code=201)
+def record_run_environment(run_id: str, body: RunEnvironmentInput) -> dict:
+    """Runner 在启动 Agent 前上报本次运行的环境指纹。"""
+    values = body.model_dump()
+    values["run_id"] = run_id
+    store.upsert_run_environment(values)
+    return {"run_id": run_id, "comparison_hash": body.comparison_hash}
+
+
+@app.get("/api/runs/{run_id}/environment")
+def run_environment(run_id: str) -> dict:
+    record = store.get_run_environment(run_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="environment fingerprint not found")
+    return record
+
+
+@app.get("/api/experiments/{experiment_id}/environments")
+def experiment_environments(experiment_id: str) -> dict:
+    """同一实验内各 Run 的环境指纹与可比性判定。"""
+    if store.get_eval_experiment(experiment_id) is None:
+        raise HTTPException(status_code=404, detail="experiment not found")
+    records = store.list_run_environments(experiment_id)
+    return {
+        "experiment_id": experiment_id,
+        "runs": records,
+        "consistency": _environment_consistency(records),
+    }
 
 
 @app.get("/api/traces/by-run-id/{run_id}")

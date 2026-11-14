@@ -248,6 +248,26 @@ CREATE TABLE IF NOT EXISTS eval_runs (
 
 CREATE INDEX IF NOT EXISTS idx_eval_runs_experiment
 ON eval_runs(experiment_id, started_at_ns DESC);
+
+CREATE TABLE IF NOT EXISTS run_environments (
+    run_id TEXT PRIMARY KEY,
+    experiment_id TEXT NOT NULL REFERENCES eval_experiments(experiment_id) ON DELETE CASCADE,
+    case_id TEXT NOT NULL,
+    agent TEXT NOT NULL DEFAULT '',
+    agent_version TEXT NOT NULL DEFAULT '',
+    runtime TEXT NOT NULL DEFAULT '',
+    model TEXT NOT NULL DEFAULT '',
+    os TEXT NOT NULL DEFAULT '',
+    timeout_sec REAL,
+    workspace_mode TEXT NOT NULL DEFAULT '',
+    workspace_path TEXT NOT NULL DEFAULT '',
+    comparison_hash TEXT NOT NULL DEFAULT '',
+    fingerprint_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_run_environments_experiment
+ON run_environments(experiment_id, created_at DESC);
 """
 
 
@@ -574,6 +594,50 @@ class Store:
                 1 if terminal else 0, time.time_ns(), run_id,
             )).rowcount
         return bool(changed)
+
+    def upsert_run_environment(self, fingerprint: Dict[str, Any]) -> None:
+        """记录一次 Run 的执行环境指纹（每个 run_id 一条）。
+
+        指纹是"这次运行在什么环境下发生"的可核查记录：agent 版本、模型、
+        OS、时间预算、工作区模式与资源限制。comparison_hash 只覆盖
+        环境一致性维度，便于跨 run 判断是否可比。
+        """
+        columns = [
+            "run_id", "experiment_id", "case_id", "agent", "agent_version",
+            "runtime", "model", "os", "timeout_sec", "workspace_mode",
+            "workspace_path", "comparison_hash", "fingerprint_json",
+        ]
+        if not fingerprint.get("run_id"):
+            raise ValueError("环境指纹缺少 run_id")
+        values = [fingerprint.get(column) for column in columns]
+        values[-1] = json.dumps(fingerprint.get("fingerprint") or {}, ensure_ascii=False)
+        with self._lock, self.connection() as db:
+            db.execute(f"""
+                INSERT INTO run_environments({','.join(columns)}) VALUES({','.join('?' for _ in columns)})
+                ON CONFLICT(run_id) DO UPDATE SET
+                    {','.join(f'{column}=excluded.{column}' for column in columns if column != 'run_id')}
+            """, values)
+
+    def get_run_environment(self, run_id: str) -> Optional[Dict[str, Any]]:
+        with self.connection() as db:
+            row = db.execute(
+                "SELECT * FROM run_environments WHERE run_id=?", (run_id,)
+            ).fetchone()
+        if row is None:
+            return None
+        record = dict(row)
+        record["fingerprint"] = json.loads(record.get("fingerprint_json") or "{}")
+        return record
+
+    def list_run_environments(self, experiment_id: str) -> List[Dict[str, Any]]:
+        with self.connection() as db:
+            rows = [dict(row) for row in db.execute("""
+                SELECT * FROM run_environments WHERE experiment_id=?
+                ORDER BY created_at, run_id
+            """, (experiment_id,)).fetchall()]
+        for record in rows:
+            record["fingerprint"] = json.loads(record.get("fingerprint_json") or "{}")
+        return rows
 
     def create_run(self, run_id: str, experiment_id: str, total: int) -> None:
         with self._lock, self.connection() as db:
